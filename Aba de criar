@@ -1,0 +1,800 @@
+-- [[ ABYSS DIE - APENAS ABA CRIAR (CRIATIVO) v2 ]]
+-- Execute DEPOIS do DIE v6
+-- Grava props colocados (nome+categoria) → montagem → salva pose + lista de props
+
+local Players = game:GetService("Players")
+local LP = Players.LocalPlayer
+local RS = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local HS = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local dieGui = CoreGui:WaitForChild("DIE_Interface", 10)
+if not dieGui then warn("DIE não encontrado!") return end
+local base = dieGui:WaitForChild("Base principal")
+local tela = base:WaitForChild("tela")
+tela.ClipsDescendants = true
+
+-- Só remove a própria página se re-executar o script (não mexe nas outras)
+local oldPage = tela:FindFirstChild("Page_CRIATIVO")
+if oldPage then oldPage:Destroy() end
+if _G.AbyssDIETabs and _G.AbyssDIETabs.pages then
+	_G.AbyssDIETabs.pages["CRIATIVO"] = nil
+end
+
+-- ====================== MULTI-ABA unificada (uma visível por vez) ======================
+_G.AbyssDIETabs = _G.AbyssDIETabs or { pages = {}, current = nil }
+_G.AbyssShared = _G.AbyssShared or {
+	petMode = false,
+	buildScale = 1,
+	followTargetName = LP.Name,
+	CurrentBuild = "B2_Spirit",
+}
+
+local function abyssShowPage(pageName, pg)
+	if pg and pg.Parent then
+		_G.AbyssDIETabs.pages[pageName] = pg
+	end
+	_G.AbyssDIETabs.current = pageName
+	for name, p in pairs(_G.AbyssDIETabs.pages) do
+		if p and p.Parent then p.Visible = (name == pageName) end
+	end
+	for _, c in ipairs(tela:GetChildren()) do
+		if c:IsA("ScrollingFrame") or (c:IsA("Frame") and tostring(c.Name):sub(1,5) == "Page_") then
+			local reg = false
+			for _, p in pairs(_G.AbyssDIETabs.pages) do if p == c then reg = true break end end
+			if not reg then c.Visible = false end
+		end
+	end
+	if pg and pg.Parent then
+		pg.Visible = true
+		if applyThemeToPage then pcall(applyThemeToPage, pg) end
+	end
+end
+
+
+local STYLES = {
+	CardColor = Color3.fromRGB(18, 18, 22),
+	StrokeColor = Color3.fromRGB(0, 140, 255),
+	TextColor = Color3.fromRGB(245, 245, 255),
+	GreenColor = Color3.fromRGB(40, 180, 80),
+	RedColor = Color3.fromRGB(180, 40, 40),
+	AccentColor = Color3.fromRGB(0, 100, 220),
+	SelectNeon = Color3.fromRGB(255, 220, 50),
+}
+
+local CONFIG_FILE = "Abyss_PerfilConfig.json"
+currentFont = Enum.Font.SourceSansBold
+
+function loadSharedTheme()
+	if not readfile or not isfile or not isfile(CONFIG_FILE) then return end
+	local ok, raw = pcall(function() return readfile(CONFIG_FILE) end)
+	if not ok or not raw or raw == "" then return end
+	local ok2, data = pcall(function() return HS:JSONDecode(raw) end)
+	if not ok2 or type(data) ~= "table" then return end
+	if type(data.CardColor) == "table" then
+		STYLES.CardColor = Color3.new(data.CardColor[1] or 0.07, data.CardColor[2] or 0.07, data.CardColor[3] or 0.09)
+	end
+	if type(data.StrokeColor) == "table" then
+		STYLES.StrokeColor = Color3.new(data.StrokeColor[1] or 0, data.StrokeColor[2] or 0.55, data.StrokeColor[3] or 1)
+	end
+	if type(data.TextColor) == "table" then
+		STYLES.TextColor = Color3.new(data.TextColor[1] or 0.96, data.TextColor[2] or 0.96, data.TextColor[3] or 1)
+	end
+	local fonts = {
+		Enum.Font.SourceSans, Enum.Font.SourceSansBold, Enum.Font.Gotham,
+		Enum.Font.GothamBold, Enum.Font.Code, Enum.Font.Ubuntu
+	}
+	if type(data.fontIdx) == "number" and fonts[data.fontIdx] then
+		currentFont = fonts[data.fontIdx]
+	end
+end
+
+function applyThemeToPage(pg)
+	if not pg then return end
+	loadSharedTheme()
+	for _, desc in ipairs(pg:GetDescendants()) do
+		if desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox") then
+			desc.TextColor3 = STYLES.TextColor
+			desc.Font = currentFont
+			for _, child in ipairs(desc:GetChildren()) do
+				if child:IsA("UIStroke") and child.ApplyStrokeMode == Enum.ApplyStrokeMode.Border then
+					child.Color = STYLES.StrokeColor
+				end
+			end
+		elseif desc:IsA("UIStroke") and desc.ApplyStrokeMode == Enum.ApplyStrokeMode.Border then
+			desc.Color = STYLES.StrokeColor
+		elseif desc:IsA("ScrollingFrame") then
+			desc.ScrollBarImageColor3 = STYLES.StrokeColor
+		end
+		if (desc:IsA("TextButton") or desc:IsA("TextBox") or desc:IsA("Frame")) and desc.BackgroundTransparency < 0.5 then
+			if desc.Name ~= "ListContainer" then
+				local c = desc.BackgroundColor3
+				local isAction = (c.G > 0.5 and c.R < 0.5) or (c.R > 0.5 and c.G < 0.5)
+				if not isAction then desc.BackgroundColor3 = STYLES.CardColor end
+			end
+		end
+	end
+end
+
+local OwnerName = LP.Name
+local FILE_NAME = "Abyss_CustomBuilds.json"
+local isRecording = false
+local recordPhase = "idle" -- idle | recording | montage
+local recordedPropsList = {} -- {name, category} por colocação
+local lastSelected = nil
+local CustomKeys = {}
+local BuildPresets = {}
+local CurrentBuild = "B2_Spirit"
+local lastAppliedColors = {}
+local petMode = false
+local boundProps = {}
+local boundPropRemotes = {}
+local buildScale = 1
+local followTargetPlayer = LP
+
+local function getPropGeometry(prop)
+	if not prop then return {Sides = 6, Size = Vector3.one, Mesh = ""} end
+	local pSize = Vector3.one
+	local pSides = 6
+	local pMesh = ""
+	if prop:IsA("BasePart") then pSize = prop.Size
+	elseif prop:IsA("Model") then local _, bboxSize = prop:GetBoundingBox() pSize = bboxSize end
+	if prop:IsA("Part") then
+		if prop.Shape == Enum.PartType.Block then pSides = 6
+		elseif prop.Shape == Enum.PartType.Cylinder then pSides = 3
+		elseif prop.Shape == Enum.PartType.Ball then pSides = 1 end
+	elseif prop:IsA("WedgePart") or prop:IsA("CornerWedgePart") then pSides = 5
+	elseif prop:IsA("MeshPart") then pSides = 0 pMesh = tostring(prop.MeshId) end
+	local specialMesh = prop:FindFirstChildOfClass("SpecialMesh")
+	if specialMesh then pMesh = tostring(specialMesh.MeshId) end
+	return {
+		Sides = pSides,
+		Size = Vector3.new(math.floor(pSize.X*100+0.5)/100, math.floor(pSize.Y*100+0.5)/100, math.floor(pSize.Z*100+0.5)/100),
+		Mesh = pMesh
+	}
+end
+
+local function isCharacterOrPlayer(v)
+	if not v then return true end
+	if Players:GetPlayerFromCharacter(v) then return true end
+	if v:FindFirstChildOfClass("Humanoid") then return true end
+	if v:IsA("BasePart") and (v.Name == "HumanoidRootPart" or v.Name == "Head" or v.Name == "Torso" or v.Name == "UpperTorso") then return true end
+	local parent = v.Parent
+	if parent then
+		if Players:GetPlayerFromCharacter(parent) then return true end
+		if parent:FindFirstChildOfClass("Humanoid") then return true end
+	end
+	return false
+end
+
+local function scanMapProps()
+	local props, added = {}, {}
+	local targetName = "Prop" .. OwnerName
+	local function checkAndAdd(v)
+		if added[v] then return end
+		if isCharacterOrPlayer(v) then return end
+		local n = tostring(v.Name or "")
+		if n == targetName or (n:sub(1,4) == "Prop" and n:find(OwnerName,1,true)) then
+			added[v] = true
+			table.insert(props, v)
+		end
+	end
+	local wsCom = workspace:FindFirstChild("WorkspaceCom")
+	if wsCom then
+		for _, folder in ipairs(wsCom:GetChildren()) do
+			for _, v in ipairs(folder:GetChildren()) do checkAndAdd(v) end
+		end
+	end
+	for _, v in ipairs(workspace:GetChildren()) do checkAndAdd(v) end
+	return props
+end
+
+local function getPropColor(prop)
+	if not prop then return Color3.fromRGB(255,255,255) end
+	for _, child in ipairs(prop:GetChildren()) do
+		if child:IsA("Color3Value") then return child.Value end
+		if child:IsA("BrickColorValue") then return child.Value.Color end
+	end
+	if prop:IsA("BasePart") and prop.Transparency < 1 then return prop.Color end
+	for _, part in ipairs(prop:GetDescendants()) do
+		if part:IsA("BasePart") and part.Transparency < 1 then
+			local name = part.Name:lower()
+			if not name:find("selection") and not name:find("highlight") and not name:find("box") and not name:find("outline") then
+				return part.Color
+			end
+		end
+	end
+	return Color3.fromRGB(255,255,255)
+end
+
+local function captureCurrentPositions()
+	local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+	local props = scanMapProps()
+	if #props == 0 then return nil end
+	local baseCF = root.CFrame
+	local newOffsets = {}
+	for _, prop in ipairs(props) do
+		local propCF = prop:GetPivot()
+		local relCF = baseCF:ToObjectSpace(propCF)
+		local pColor = getPropColor(prop)
+		local pGeom = getPropGeometry(prop)
+		table.insert(newOffsets, {
+			CF = relCF, Color = pColor,
+			Geom = {Sides = pGeom.Sides, Size = {pGeom.Size.X, pGeom.Size.Y, pGeom.Size.Z}, Mesh = pGeom.Mesh}
+		})
+	end
+	return newOffsets
+end
+
+
+local function rebindPropsToBuild()
+	boundProps = {}
+	boundPropRemotes = {}
+	local entry = BuildPresets[CurrentBuild]
+	local offsets = nil
+	if entry then
+		if entry.offsets then offsets = entry.offsets
+		elseif type(entry) == "table" and entry[1] then offsets = entry end
+	end
+	if not offsets then return end
+	local availableProps = scanMapProps()
+	local usedProps = {}
+	local function cacheRemote(prop)
+		if not prop then return end
+		local cfR = prop:FindFirstChild("SetCurrentCFrame", true)
+		if cfR then boundPropRemotes[prop] = cfR end
+	end
+	for idx, data in ipairs(offsets) do
+		local targetGeom = (type(data) == "table") and data.Geom or nil
+		if targetGeom then
+			local targetSides = targetGeom.Sides or 6
+			local targetSize = Vector3.new(targetGeom.Size[1] or 1, targetGeom.Size[2] or 1, targetGeom.Size[3] or 1)
+			local targetMesh = targetGeom.Mesh or ""
+			for _, prop in ipairs(availableProps) do
+				if not usedProps[prop] then
+					local propGeom = getPropGeometry(prop)
+					local sizeDiff = (propGeom.Size - targetSize).Magnitude
+					if propGeom.Sides == targetSides and sizeDiff < 0.2 and propGeom.Mesh == targetMesh then
+						usedProps[prop] = true
+						boundProps[idx] = prop
+						cacheRemote(prop)
+						break
+					end
+				end
+			end
+		end
+	end
+	for idx, _ in ipairs(offsets) do
+		if not boundProps[idx] then
+			for _, prop in ipairs(availableProps) do
+				if not usedProps[prop] then
+					usedProps[prop] = true
+					boundProps[idx] = prop
+					cacheRemote(prop)
+					break
+				end
+			end
+		end
+	end
+end
+
+local function saveCustomBuildsToFile()
+	if not writefile then return end
+	local dataToSave = {}
+	for _, name in ipairs(CustomKeys) do
+		local entry = BuildPresets[name]
+		if entry then
+			-- formato novo: { offsets = {...}, propsList = {...} }
+			local offsets = entry.offsets or entry -- compat antigo (só array)
+			local propsList = entry.propsList or {}
+			local serialBuild = {}
+			if type(offsets) == "table" then
+				for _, item in ipairs(offsets) do
+					if typeof(item) == "table" and item.CF and item.Color then
+						table.insert(serialBuild, {
+							CF = {item.CF:GetComponents()},
+							Color = {item.Color.R, item.Color.G, item.Color.B},
+							Geom = item.Geom or {Sides=6, Size={1,1,1}, Mesh=""}
+						})
+					end
+				end
+			end
+			dataToSave[name] = {
+				offsets = serialBuild,
+				propsList = propsList,
+			}
+		end
+	end
+	pcall(function() writefile(FILE_NAME, HS:JSONEncode(dataToSave)) end)
+end
+
+local function savePropsListOnly(buildName, propsList)
+	if not writefile or not buildName or type(propsList) ~= "table" then return false end
+	local dataToSave = {}
+	if readfile and isfile and isfile(FILE_NAME) then
+		local ok, raw = pcall(function() return readfile(FILE_NAME) end)
+		if ok and raw and raw ~= "" then
+			local ok2, decoded = pcall(function() return HS:JSONDecode(raw) end)
+			if ok2 and type(decoded) == "table" then dataToSave = decoded end
+		end
+	end
+	local existing = dataToSave[buildName]
+	if type(existing) == "table" then
+		if existing.offsets then
+			existing.propsList = propsList
+			dataToSave[buildName] = existing
+		else
+			dataToSave[buildName] = { offsets = existing, propsList = propsList }
+		end
+	else
+		dataToSave[buildName] = { offsets = {}, propsList = propsList }
+	end
+	return pcall(function() writefile(FILE_NAME, HS:JSONEncode(dataToSave)) end)
+end
+
+local function loadCustomBuildsFromFile()
+	if not readfile or not isfile or not isfile(FILE_NAME) then return end
+	local ok, raw = pcall(function() return readfile(FILE_NAME) end)
+	if not ok or not raw or raw == "" then return end
+	local okDecode, decoded = pcall(function() return HS:JSONDecode(raw) end)
+	if not okDecode or type(decoded) ~= "table" then return end
+	for name, entry in pairs(decoded) do
+		if type(entry) == "table" then
+			local serialOffsets = entry.offsets or entry -- compat: lista direta
+			local propsList = entry.propsList or {}
+			local restoredBuild = {}
+			if type(serialOffsets) == "table" then
+				for _, item in ipairs(serialOffsets) do
+					if item.CF and item.Color then
+						table.insert(restoredBuild, {
+							CF = CFrame.new(unpack(item.CF)),
+							Color = Color3.new(item.Color[1], item.Color[2], item.Color[3]),
+							Geom = item.Geom or {Sides=6, Size={1,1,1}, Mesh=""}
+						})
+					end
+				end
+			end
+			BuildPresets[name] = { offsets = restoredBuild, propsList = propsList }
+			if not table.find(CustomKeys, name) then table.insert(CustomKeys, name) end
+		end
+	end
+end
+
+-- ====================== HOOK: grava prop por COLOCACÃO ======================
+local function addRecordedProp(name, category)
+	if typeof(name) ~= "string" or typeof(category) ~= "string" then return end
+	name = name:gsub("%s+", "")
+	category = category:gsub("%s+", "")
+	if name == "" or category == "" then return end
+	table.insert(recordedPropsList, { name = name, category = category })
+	if updateRecordUI then updateRecordUI() end
+	print("[Criar] + " .. name .. " | " .. category .. " (total: " .. #recordedPropsList .. ")")
+end
+
+local hookOk = false
+pcall(function()
+	if not hookmetamethod or not getnamecallmethod or not newcclosure then return end
+	local oldNamecall
+	oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+		local args = {...}
+		if isRecording and recordPhase == "recording" and (method == "FireServer" or method == "fireServer") then
+			local remoteName = ""
+			pcall(function() remoteName = tostring(self.Name) end)
+			if typeof(args[1]) == "string" and args[1] == "RequestingPropName" then
+				local n = tostring(args[2] or ""):gsub("%s+", "")
+				local c = tostring(args[3] or ""):gsub("%s+", "")
+				if n ~= "" and c ~= "" then
+					lastSelected = { name = n, category = c }
+				end
+			end
+			if lastSelected and (
+				remoteName == "Tool_PropMake"
+				or remoteName:lower():find("propmake")
+				or remoteName:lower():find("prop_make")
+			) then
+				local selName = lastSelected.name
+				local selCat = lastSelected.category
+				task.spawn(function()
+					local countBefore = 0
+					pcall(function() countBefore = #scanMapProps() end)
+					task.wait(0.45)
+					if not isRecording or recordPhase ~= "recording" then return end
+					local countAfter = 0
+					pcall(function() countAfter = #scanMapProps() end)
+					if countAfter > countBefore then
+						addRecordedProp(selName, selCat)
+					end
+				end)
+			end
+		end
+		return oldNamecall(self, ...)
+	end))
+	hookOk = true
+end)
+if not hookOk then
+	warn("[Criar] hookmetamethod indisponível — gravação de props por colocação pode não funcionar neste executor")
+end
+
+-- UI
+local CONTENT_WIDTH, BTN_H, PAD_Y = 0.90, 20, 3
+local function applyStyle(inst, r, hasStroke, col)
+	if r then local c = inst:FindFirstChildOfClass("UICorner") or Instance.new("UICorner") c.CornerRadius = UDim.new(0,r) c.Parent = inst end
+	if hasStroke then
+		local s = inst:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+		s.Color = col or STYLES.StrokeColor
+		s.Thickness = 1
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = inst
+	end
+end
+local function createStyledBtn(text, parent, h, strokeCol)
+	local btn = Instance.new("TextButton")
+	btn.Text, btn.Size = text, UDim2.new(CONTENT_WIDTH,0,0,h or BTN_H)
+	btn.BackgroundColor3, btn.TextColor3 = STYLES.CardColor, STYLES.TextColor
+	btn.Font, btn.TextSize, btn.TextWrapped, btn.AutoButtonColor = Enum.Font.SourceSansBold, 10, true, true
+	btn.Parent = parent
+	applyStyle(btn, 4, true, strokeCol)
+	return btn
+end
+local function createLabel(text, parent, h, fs)
+	local lbl = Instance.new("TextLabel")
+	lbl.Text, lbl.Size = text, UDim2.new(CONTENT_WIDTH,0,0,h or 14)
+	lbl.BackgroundTransparency, lbl.TextColor3 = 1, STYLES.TextColor
+	lbl.Font, lbl.TextSize, lbl.TextWrapped, lbl.TextXAlignment = Enum.Font.SourceSans, fs or 10, true, Enum.TextXAlignment.Center
+	lbl.Parent = parent
+	return lbl
+end
+
+local page = Instance.new("ScrollingFrame")
+page.Name = "Page_CRIATIVO"
+page.Size = UDim2.new(1,-10,1,-28)
+page.Position = UDim2.new(0,5,0,22)
+page.BackgroundTransparency = 1
+page.BorderSizePixel = 0
+page.ScrollBarThickness = 3
+page.ScrollBarImageColor3 = STYLES.StrokeColor
+page.CanvasSize = UDim2.new(0,0,0,0)
+page.Visible = true
+page.Parent = tela
+abyssShowPage("CRIATIVO", page)
+
+local pad = Instance.new("UIPadding")
+pad.PaddingTop = UDim.new(0,2) pad.PaddingBottom = UDim.new(0,8)
+pad.PaddingLeft = UDim.new(0,6) pad.PaddingRight = UDim.new(0,6)
+pad.Parent = page
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, PAD_Y)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = page
+layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	page.CanvasSize = UDim2.new(0,0,0, layout.AbsoluteContentSize.Y + 12)
+end)
+
+createLabel("📦 CRIAR BUILD", page, 14, 9)
+
+local statusLbl = createLabel("1) Grave os props colocados", page, 14, 8)
+statusLbl.TextColor3 = STYLES.SelectNeon
+
+local propsCountLbl = createLabel("Props gravados: 0", page, 12, 8)
+
+local propsScroll = Instance.new("ScrollingFrame")
+propsScroll.Size = UDim2.new(CONTENT_WIDTH, 0, 0, 50)
+propsScroll.BackgroundColor3 = STYLES.CardColor
+propsScroll.BackgroundTransparency = 0.3
+propsScroll.ScrollBarThickness = 2
+propsScroll.CanvasSize = UDim2.new(0,0,0,0)
+propsScroll.Parent = page
+applyStyle(propsScroll, 4, true)
+
+local propsLayout = Instance.new("UIListLayout")
+propsLayout.Padding = UDim.new(0, 2)
+propsLayout.Parent = propsScroll
+propsLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	propsScroll.CanvasSize = UDim2.new(0,0,0, propsLayout.AbsoluteContentSize.Y + 4)
+end)
+
+function updateRecordUI()
+	propsCountLbl.Text = "Props gravados: " .. #recordedPropsList
+	for _, c in ipairs(propsScroll:GetChildren()) do
+		if not c:IsA("UIListLayout") then c:Destroy() end
+	end
+	for i, p in ipairs(recordedPropsList) do
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(1, -4, 0, 12)
+		lbl.BackgroundTransparency = 1
+		lbl.Text = i .. ". " .. p.name .. " | " .. p.category
+		lbl.TextColor3 = STYLES.TextColor
+		lbl.Font = Enum.Font.SourceSans
+		lbl.TextSize = 8
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.Parent = propsScroll
+		local pd = Instance.new("UIPadding")
+		pd.PaddingLeft = UDim.new(0, 4)
+		pd.Parent = lbl
+	end
+end
+
+local RecordBtn = createStyledBtn("🔴 1) INICIAR GRAVAÇÃO", page, 22, STYLES.GreenColor)
+local SavePoseBtn = createStyledBtn("💾 2) SALVAR POSE + NOME", page, 22, STYLES.AccentColor)
+SavePoseBtn.Visible = false
+
+local CustomNameBox = Instance.new("TextBox")
+CustomNameBox.PlaceholderText = "Nome da Build..."
+CustomNameBox.Text = ""
+CustomNameBox.Size = UDim2.new(CONTENT_WIDTH,0,0,18)
+CustomNameBox.BackgroundColor3 = STYLES.CardColor
+CustomNameBox.TextColor3 = STYLES.TextColor
+CustomNameBox.Font = Enum.Font.SourceSans
+CustomNameBox.TextSize = 10
+CustomNameBox.ClearTextOnFocus = false
+CustomNameBox.Visible = false
+CustomNameBox.Parent = page
+applyStyle(CustomNameBox, 4, true)
+
+local tipLbl = createLabel("Coloque os props no mapa enquanto grava", page, 16, 8)
+
+local reRecordTargetName = nil
+
+local function startRecordingUI(reName)
+	recordedPropsList = {}
+	lastSelected = nil
+	isRecording = true
+	recordPhase = "recording"
+	reRecordTargetName = reName
+	if reName then _G.AbyssReRecordProps = { buildName = reName } end
+	RecordBtn.Text = "⏹ PARAR GRAVAÇÃO"
+	RecordBtn.BackgroundColor3 = STYLES.RedColor
+	SavePoseBtn.Visible = false
+	CustomNameBox.Visible = false
+	if reName then
+		statusLbl.Text = "Regravando lista: " .. reName
+		tipLbl.Text = "Coloque os props e pare — salva só a lista"
+	else
+		statusLbl.Text = "Gravando colocações..."
+		tipLbl.Text = "Coloque os props no mapa enquanto grava"
+	end
+	statusLbl.TextColor3 = STYLES.GreenColor
+	updateRecordUI()
+end
+
+local function finishReRecordListOnly()
+	local targetName = reRecordTargetName or (_G.AbyssReRecordProps and _G.AbyssReRecordProps.buildName)
+	reRecordTargetName = nil
+	_G.AbyssReRecordProps = nil
+	isRecording = false
+	if not targetName or #recordedPropsList == 0 then
+		recordPhase = "idle"
+		RecordBtn.Text = "🔴 1) INICIAR GRAVAÇÃO"
+		RecordBtn.BackgroundColor3 = STYLES.GreenColor
+		statusLbl.Text = (not targetName) and "1) Grave os props colocados" or "Nenhum prop gravado"
+		statusLbl.TextColor3 = STYLES.SelectNeon
+		tipLbl.Text = "Coloque os props no mapa enquanto grava"
+		updateRecordUI()
+		return
+	end
+	local listCopy = {}
+	for i, p in ipairs(recordedPropsList) do
+		listCopy[i] = { name = p.name, category = p.category }
+	end
+	local ok = savePropsListOnly(targetName, listCopy)
+	recordPhase = "idle"
+	RecordBtn.Text = "🔴 1) INICIAR GRAVAÇÃO"
+	RecordBtn.BackgroundColor3 = STYLES.GreenColor
+	SavePoseBtn.Visible = false
+	CustomNameBox.Visible = false
+	statusLbl.Text = ok and ("✅ Lista salva em \"" .. targetName .. "\" (" .. #listCopy .. ")") or "❌ Falha ao salvar lista"
+	statusLbl.TextColor3 = ok and STYLES.GreenColor or STYLES.RedColor
+	tipLbl.Text = "Coloque os props no mapa enquanto grava"
+	updateRecordUI()
+	task.delay(3, function()
+		if recordPhase == "idle" then
+			statusLbl.Text = "1) Grave os props colocados"
+			statusLbl.TextColor3 = STYLES.SelectNeon
+		end
+	end)
+end
+
+RecordBtn.MouseButton1Click:Connect(function()
+	if recordPhase == "idle" then
+		startRecordingUI(nil)
+	elseif recordPhase == "recording" then
+		local target = reRecordTargetName or (_G.AbyssReRecordProps and _G.AbyssReRecordProps.buildName)
+		if target then
+			finishReRecordListOnly()
+			return
+		end
+		isRecording = false
+		recordPhase = "montage"
+		RecordBtn.Text = "🔄 RECOMEÇAR"
+		RecordBtn.BackgroundColor3 = STYLES.CardColor
+		statusLbl.Text = "2) Posicione os props e salve"
+		statusLbl.TextColor3 = STYLES.SelectNeon
+		SavePoseBtn.Visible = true
+		CustomNameBox.Visible = true
+		tipLbl.Text = "Monte a pose e clique SALVAR"
+		updateRecordUI()
+	elseif recordPhase == "montage" then
+		recordedPropsList = {}
+		lastSelected = nil
+		isRecording = false
+		recordPhase = "idle"
+		reRecordTargetName = nil
+		_G.AbyssReRecordProps = nil
+		RecordBtn.Text = "🔴 1) INICIAR GRAVAÇÃO"
+		RecordBtn.BackgroundColor3 = STYLES.GreenColor
+		statusLbl.Text = "1) Grave os props colocados"
+		statusLbl.TextColor3 = STYLES.SelectNeon
+		SavePoseBtn.Visible = false
+		CustomNameBox.Visible = false
+		CustomNameBox.Text = ""
+		tipLbl.Text = "Coloque os props no mapa enquanto grava"
+		updateRecordUI()
+	end
+end)
+
+_G.AbyssStartReRecord = function()
+	local info = _G.AbyssReRecordProps
+	if not info or not info.buildName then return end
+	abyssShowPage("CRIATIVO", page)
+	startRecordingUI(info.buildName)
+end
+
+SavePoseBtn.MouseButton1Click:Connect(function()
+	if recordPhase ~= "montage" then return end
+	local recordedData = captureCurrentPositions()
+	if not recordedData or #recordedData == 0 then
+		SavePoseBtn.Text = "⚠️ NENHUM PROP NO MAPA!"
+		task.wait(1.5)
+		SavePoseBtn.Text = "💾 2) SALVAR POSE + NOME"
+		return
+	end
+	local name = CustomNameBox.Text ~= "" and CustomNameBox.Text or ("Build_" .. tostring(#CustomKeys + 1))
+	-- salva offsets + lista de props para auto-colocar
+	BuildPresets[name] = {
+		offsets = recordedData,
+		propsList = recordedPropsList, -- cópia da lista gravada
+	}
+	if not table.find(CustomKeys, name) then table.insert(CustomKeys, name) end
+	CurrentBuild = name
+	petMode = true
+	lastAppliedColors = {}
+	rebindPropsToBuild()
+	_G.AbyssShared.CurrentBuild = name
+	_G.AbyssShared.petMode = true
+	saveCustomBuildsToFile()
+
+	SavePoseBtn.Text = "✅ SALVA! (" .. #recordedPropsList .. " props)"
+	SavePoseBtn.BackgroundColor3 = STYLES.GreenColor
+	task.wait(1.5)
+	-- reset
+	recordedPropsList = {}
+	lastSelected = nil
+	isRecording = false
+	recordPhase = "idle"
+	RecordBtn.Text = "🔴 1) INICIAR GRAVAÇÃO"
+	RecordBtn.BackgroundColor3 = STYLES.GreenColor
+	SavePoseBtn.Text = "💾 2) SALVAR POSE + NOME"
+	SavePoseBtn.BackgroundColor3 = STYLES.AccentColor
+	SavePoseBtn.Visible = false
+	CustomNameBox.Visible = false
+	CustomNameBox.Text = ""
+	statusLbl.Text = "1) Grave os props colocados"
+	statusLbl.TextColor3 = STYLES.SelectNeon
+	tipLbl.Text = "Coloque os props no mapa enquanto grava"
+	updateRecordUI()
+end)
+
+createLabel("(Criar v2 — grava props + pose)", page, 12, 8)
+
+loadCustomBuildsFromFile()
+updateRecordUI()
+
+local hitCriar = base:FindFirstChild("aba de criar")
+if hitCriar then
+	local hb = hitCriar:FindFirstChild("Hitbox")
+	if hb then hb.MouseButton1Click:Connect(function() abyssShowPage("CRIATIVO", page) end) end
+end
+
+if page then applyThemeToPage(page) end
+
+-- ====================== COR + FOLLOW (método ybyss) ======================
+local function applyPropColor(prop, color)
+	if not prop or not color then return end
+	local key = tostring(prop:GetDebugId())
+	if lastAppliedColors[key] == tostring(color) then return end
+	lastAppliedColors[key] = tostring(color)
+	task.spawn(function()
+		local crR = prop:FindFirstChild("ChangePropColor", true)
+		if crR then
+			pcall(function()
+				if crR:IsA("RemoteFunction") then crR:InvokeServer(color)
+				elseif crR:IsA("RemoteEvent") then crR:FireServer(color) end
+			end)
+		end
+		for _, child in ipairs(prop:GetDescendants()) do
+			if child.Name == "SetColor" or child.Name == "ChangeColor" or child.Name == "ChangePropColor"
+				or child.Name == "Paint"
+				or (child.Name == "Color" and (child:IsA("RemoteEvent") or child:IsA("RemoteFunction"))) then
+				if child:IsA("RemoteFunction") then pcall(function() child:InvokeServer(color) end)
+				elseif child:IsA("RemoteEvent") then pcall(function() child:FireServer(color) end) end
+			end
+		end
+	end)
+	pcall(function()
+		if prop:IsA("BasePart") then prop.Color = color
+		else
+			for _, part in ipairs(prop:GetDescendants()) do
+				if part:IsA("BasePart") and not part.Name:lower():find("selection") then part.Color = color end
+			end
+		end
+	end)
+end
+
+local RS = game:GetService("RunService")
+RS.Heartbeat:Connect(function()
+	local s = _G.AbyssShared
+	if s then
+		if s.petMode ~= nil then petMode = s.petMode end
+		if s.buildScale then buildScale = s.buildScale end
+		if s.followTargetName and Players:FindFirstChild(s.followTargetName) then
+			followTargetPlayer = Players[s.followTargetName]
+		end
+	end
+	if not petMode then return end
+	local entry = BuildPresets[CurrentBuild]
+	local offsets = nil
+	if entry then
+		if entry.offsets then offsets = entry.offsets
+		elseif type(entry) == "table" and entry[1] and (entry[1].CF or typeof(entry[1]) == "Vector3") then
+			offsets = entry
+		end
+	end
+	if not offsets then return end
+	local character = (followTargetPlayer or LP).Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local baseCF = root.CFrame
+	local scale = buildScale or 1
+	local totalOffsets = #offsets
+	for idx, prop in pairs(boundProps) do
+		if prop and prop.Parent and not isCharacterOrPlayer(prop) then
+			local targetCF, itemColor
+			if idx <= totalOffsets then
+				local data = offsets[idx]
+				local relCF
+				if typeof(data) == "Vector3" then relCF = CFrame.new(data)
+				elseif typeof(data) == "CFrame" then relCF = data
+				elseif typeof(data) == "table" then
+					relCF = data.CF or CFrame.new()
+					itemColor = data.Color
+				end
+				if relCF then
+					targetCF = baseCF * CFrame.new(relCF.Position * scale) * relCF.Rotation
+				end
+			end
+			if targetCF then
+				local cfR = boundPropRemotes[prop]
+				if not cfR then
+					cfR = prop:FindFirstChild("SetCurrentCFrame", true)
+					if cfR then boundPropRemotes[prop] = cfR end
+				end
+				if cfR then
+					task.spawn(function()
+						pcall(function()
+							if cfR:IsA("RemoteFunction") then cfR:InvokeServer(targetCF)
+							elseif cfR:IsA("RemoteEvent") then cfR:FireServer(targetCF) end
+						end)
+					end)
+				end
+				if itemColor then applyPropColor(prop, itemColor) end
+			end
+		end
+	end
+end)
+
+print("Abyss DIE — Aba CRIAR v2 (sync + regrava lista)")
