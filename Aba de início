@@ -24,7 +24,11 @@ _G.AbyssShared = _G.AbyssShared or {
 	buildScale = 1,
 	followTargetName = LP.Name,
 	CurrentBuild = "B2_Spirit",
+	antiSeatEnabled = false,
 }
+if _G.AbyssShared.antiSeatEnabled == nil then
+	_G.AbyssShared.antiSeatEnabled = false
+end
 
 local function abyssShowPage(pageName, pg)
 	if pg and pg.Parent then _G.AbyssDIETabs.pages[pageName] = pg end
@@ -113,7 +117,8 @@ end
 local OwnerName = LP.Name
 local petMode = false
 local buildScale = 1
-local antiSeatEnabled = false
+-- estado do anti-seat persiste entre troca de aba / re-execução
+local antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
 local boundProps = {}
 local boundPropRemotes = {}
 local lastAppliedColors = {}
@@ -363,8 +368,9 @@ local function updateAntiSeatState()
 	end
 end
 
-AntiSeatBtn.MouseButton1Click:Connect(function()
-	antiSeatEnabled = not antiSeatEnabled
+local function syncAntiSeatBtn()
+	-- sempre lê o estado compartilhado pra não dessincronizar ao voltar na aba
+	antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or antiSeatEnabled
 	if antiSeatEnabled then
 		AntiSeatBtn.Text = "✅ ANTI-SEAT: ON"
 		AntiSeatBtn.BackgroundColor3 = STYLES.GreenColor
@@ -373,7 +379,16 @@ AntiSeatBtn.MouseButton1Click:Connect(function()
 		AntiSeatBtn.BackgroundColor3 = STYLES.CardColor
 	end
 	updateAntiSeatState()
+end
+
+AntiSeatBtn.MouseButton1Click:Connect(function()
+	antiSeatEnabled = not antiSeatEnabled
+	_G.AbyssShared.antiSeatEnabled = antiSeatEnabled
+	syncAntiSeatBtn()
 end)
+
+-- restaura visual + efeito ao carregar a aba
+syncAntiSeatBtn()
 
 createLabel("Detecção geométrica • até 15 props\nClique no preset para trocar", page, 28, 9)
 createLabel("(Aba Início isolada)", page, 14, 8)
@@ -433,8 +448,14 @@ end)
 local hitInicio = base:FindFirstChild("aba de inicio")
 if hitInicio then
 	local hb = hitInicio:FindFirstChild("Hitbox")
-	if hb then hb.MouseButton1Click:Connect(function() abyssShowPage("PADRAO", page) end) end
+	if hb then hb.MouseButton1Click:Connect(function()
+		abyssShowPage("PADRAO", page)
+		-- reaplica tema e re-sincroniza o botão anti-seat
+		if applyThemeToPage then pcall(applyThemeToPage, page) end
+		syncAntiSeatBtn()
+	end) end
 end
 
 if page then applyThemeToPage(page) end
+syncAntiSeatBtn()
 print("Abyss DIE — Apenas Aba INÍCIO carregada")
