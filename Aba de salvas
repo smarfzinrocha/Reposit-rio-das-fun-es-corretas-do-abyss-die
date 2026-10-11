@@ -1,0 +1,1014 @@
+-- [[ ABYSS DIE - APENAS ABA SALVAS v2 ]]
+-- Execute DEPOIS do DIE v6
+-- Lista builds | carregar | auto-colocar props | excluir com confirmação
+
+local Players = game:GetService("Players")
+local LP = Players.LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+local HS = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local dieGui = CoreGui:WaitForChild("DIE_Interface", 10)
+if not dieGui then warn("DIE não encontrado!") return end
+local base = dieGui:WaitForChild("Base principal")
+local tela = base:WaitForChild("tela")
+tela.ClipsDescendants = true
+
+-- Só remove a própria página se re-executar o script (não mexe nas outras)
+local oldPage = tela:FindFirstChild("Page_SALVAS")
+if oldPage then oldPage:Destroy() end
+if _G.AbyssDIETabs and _G.AbyssDIETabs.pages then
+	_G.AbyssDIETabs.pages["SALVAS"] = nil
+end
+for _, c in ipairs(tela:GetChildren()) do
+	if c.Name == "ConfirmDeleteBuild" then c:Destroy() end
+end
+
+-- ====================== MULTI-ABA unificada (uma visível por vez) ======================
+_G.AbyssDIETabs = _G.AbyssDIETabs or { pages = {}, current = nil }
+_G.AbyssShared = _G.AbyssShared or {
+	petMode = false,
+	buildScale = 1,
+	followTargetName = LP.Name,
+	CurrentBuild = "B2_Spirit",
+}
+
+local function abyssShowPage(pageName, pg)
+	if pg and pg.Parent then
+		_G.AbyssDIETabs.pages[pageName] = pg
+	end
+	_G.AbyssDIETabs.current = pageName
+	for name, p in pairs(_G.AbyssDIETabs.pages) do
+		if p and p.Parent then p.Visible = (name == pageName) end
+	end
+	for _, c in ipairs(tela:GetChildren()) do
+		if c:IsA("ScrollingFrame") or (c:IsA("Frame") and tostring(c.Name):sub(1,5) == "Page_") then
+			local reg = false
+			for _, p in pairs(_G.AbyssDIETabs.pages) do if p == c then reg = true break end end
+			if not reg then c.Visible = false end
+		end
+	end
+	if pg and pg.Parent then
+		pg.Visible = true
+		if applyThemeToPage then pcall(applyThemeToPage, pg) end
+	end
+end
+
+
+local STYLES = {
+	CardColor = Color3.fromRGB(18, 18, 22),
+	StrokeColor = Color3.fromRGB(0, 140, 255),
+	TextColor = Color3.fromRGB(245, 245, 255),
+	AccentColor = Color3.fromRGB(0, 100, 220),
+	GreenColor = Color3.fromRGB(40, 180, 80),
+	RedColor = Color3.fromRGB(180, 40, 40),
+	SelectNeon = Color3.fromRGB(255, 220, 50),
+}
+
+local CONFIG_FILE = "Abyss_PerfilConfig.json"
+currentFont = Enum.Font.SourceSansBold
+
+function loadSharedTheme()
+	if not readfile or not isfile or not isfile(CONFIG_FILE) then return end
+	local ok, raw = pcall(function() return readfile(CONFIG_FILE) end)
+	if not ok or not raw or raw == "" then return end
+	local ok2, data = pcall(function() return HS:JSONDecode(raw) end)
+	if not ok2 or type(data) ~= "table" then return end
+	if type(data.CardColor) == "table" then
+		STYLES.CardColor = Color3.new(data.CardColor[1] or 0.07, data.CardColor[2] or 0.07, data.CardColor[3] or 0.09)
+	end
+	if type(data.StrokeColor) == "table" then
+		STYLES.StrokeColor = Color3.new(data.StrokeColor[1] or 0, data.StrokeColor[2] or 0.55, data.StrokeColor[3] or 1)
+	end
+	if type(data.TextColor) == "table" then
+		STYLES.TextColor = Color3.new(data.TextColor[1] or 0.96, data.TextColor[2] or 0.96, data.TextColor[3] or 1)
+	end
+	local fonts = {
+		Enum.Font.SourceSans, Enum.Font.SourceSansBold, Enum.Font.Gotham,
+		Enum.Font.GothamBold, Enum.Font.Code, Enum.Font.Ubuntu
+	}
+	if type(data.fontIdx) == "number" and fonts[data.fontIdx] then
+		currentFont = fonts[data.fontIdx]
+	end
+end
+
+function applyThemeToPage(pg)
+	if not pg then return end
+	loadSharedTheme()
+	for _, desc in ipairs(pg:GetDescendants()) do
+		if desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox") then
+			desc.TextColor3 = STYLES.TextColor
+			desc.Font = currentFont
+			for _, child in ipairs(desc:GetChildren()) do
+				if child:IsA("UIStroke") and child.ApplyStrokeMode == Enum.ApplyStrokeMode.Border then
+					child.Color = STYLES.StrokeColor
+				end
+			end
+		elseif desc:IsA("UIStroke") and desc.ApplyStrokeMode == Enum.ApplyStrokeMode.Border then
+			desc.Color = STYLES.StrokeColor
+		elseif desc:IsA("ScrollingFrame") then
+			desc.ScrollBarImageColor3 = STYLES.StrokeColor
+		end
+		if (desc:IsA("TextButton") or desc:IsA("TextBox") or desc:IsA("Frame")) and desc.BackgroundTransparency < 0.5 then
+			if desc.Name ~= "ListContainer" and desc.Name ~= "ConfirmDeleteBuild" then
+				local c = desc.BackgroundColor3
+				local isAction = (c.G > 0.5 and c.R < 0.5) or (c.R > 0.5 and c.G < 0.5) or (c.R > 0.8 and c.G > 0.5)
+				if not isAction then desc.BackgroundColor3 = STYLES.CardColor end
+			end
+		end
+	end
+end
+
+local OwnerName = LP.Name
+local FILE_NAME = "Abyss_CustomBuilds.json"
+local ANIM_FILE_NAME = "Abyss_BuildAnimations.json"
+local lastAppliedColors = {}
+local boundProps = {}
+local boundPropRemotes = {}
+local CustomKeys = {}
+local CurrentBuild = "B2_Spirit"
+local BuildPresets = {}
+local buildScale = 1
+local followTargetPlayer = LP
+local petMode = false
+local isPlacing = false
+local BuildAnimations = {}
+local ActiveAnimations = {}
+local activeEmoteAnim = nil
+local activeEmoteTime = 0
+
+local function getPropGeometry(prop)
+	if not prop then return {Sides = 6, Size = Vector3.one, Mesh = ""} end
+	local pSize = Vector3.one
+	local pSides = 6
+	local pMesh = ""
+	if prop:IsA("BasePart") then pSize = prop.Size
+	elseif prop:IsA("Model") then local _, bboxSize = prop:GetBoundingBox() pSize = bboxSize end
+	if prop:IsA("Part") then
+		if prop.Shape == Enum.PartType.Block then pSides = 6
+		elseif prop.Shape == Enum.PartType.Cylinder then pSides = 3
+		elseif prop.Shape == Enum.PartType.Ball then pSides = 1 end
+	elseif prop:IsA("WedgePart") or prop:IsA("CornerWedgePart") then pSides = 5
+	elseif prop:IsA("MeshPart") then pSides = 0 pMesh = tostring(prop.MeshId) end
+	local specialMesh = prop:FindFirstChildOfClass("SpecialMesh")
+	if specialMesh then pMesh = tostring(specialMesh.MeshId) end
+	return {
+		Sides = pSides,
+		Size = Vector3.new(math.floor(pSize.X*100+0.5)/100, math.floor(pSize.Y*100+0.5)/100, math.floor(pSize.Z*100+0.5)/100),
+		Mesh = pMesh
+	}
+end
+
+local function isCharacterOrPlayer(v)
+	if not v then return true end
+	if Players:GetPlayerFromCharacter(v) then return true end
+	if v:FindFirstChildOfClass("Humanoid") then return true end
+	if v:IsA("BasePart") and (v.Name == "HumanoidRootPart" or v.Name == "Head" or v.Name == "Torso" or v.Name == "UpperTorso") then return true end
+	local parent = v.Parent
+	if parent then
+		if Players:GetPlayerFromCharacter(parent) then return true end
+		if parent:FindFirstChildOfClass("Humanoid") then return true end
+	end
+	return false
+end
+
+local function scanMapProps()
+	local props, added = {}, {}
+	local targetName = "Prop" .. OwnerName
+	local function checkAndAdd(v)
+		if added[v] then return end
+		if isCharacterOrPlayer(v) then return end
+		local n = tostring(v.Name or "")
+		if n == targetName or (n:sub(1,4) == "Prop" and n:find(OwnerName,1,true)) then
+			added[v] = true
+			table.insert(props, v)
+		end
+	end
+	local wsCom = workspace:FindFirstChild("WorkspaceCom")
+	if wsCom then
+		for _, folder in ipairs(wsCom:GetChildren()) do
+			for _, v in ipairs(folder:GetChildren()) do checkAndAdd(v) end
+		end
+	end
+	for _, v in ipairs(workspace:GetChildren()) do checkAndAdd(v) end
+	return props
+end
+
+local function getOffsets(entry)
+	if not entry then return nil end
+	if entry.offsets then return entry.offsets end
+	-- compat formato antigo (array direto)
+	if type(entry) == "table" and entry[1] and entry[1].CF then return entry end
+	return nil
+end
+
+local function getPropsList(entry)
+	if not entry then return {} end
+	return entry.propsList or {}
+end
+
+local function loadAnimationsFromFile()
+	if not readfile or not isfile or not isfile(ANIM_FILE_NAME) then return end
+	local ok, raw = pcall(function() return readfile(ANIM_FILE_NAME) end)
+	if not ok or not raw or raw == "" then return end
+	local okDecode, decoded = pcall(function() return HS:JSONDecode(raw) end)
+	if not okDecode or type(decoded) ~= "table" then return end
+	local animsToLoad = decoded.Animations or decoded
+	if decoded.Active then ActiveAnimations = decoded.Active end
+	for buildName, types in pairs(animsToLoad) do
+		BuildAnimations[buildName] = BuildAnimations[buildName] or { Walk = {}, Idle = {}, Emote = {} }
+		for animType, anims in pairs(types) do
+			BuildAnimations[buildName][animType] = BuildAnimations[buildName][animType] or {}
+			for animName, serializedKeyframes in pairs(anims) do
+				local restoredKeyframes = {}
+				for _, kfTable in ipairs(serializedKeyframes) do
+					if type(kfTable) == "table" then
+						local propCFs = {}
+						for _, comp in ipairs(kfTable) do
+							if type(comp) == "table" then table.insert(propCFs, CFrame.new(unpack(comp))) end
+						end
+						if #propCFs > 0 then table.insert(restoredKeyframes, propCFs) end
+					end
+				end
+				BuildAnimations[buildName][animType][animName] = restoredKeyframes
+			end
+		end
+	end
+end
+
+local function getMissingProps(buildName)
+	local entry = BuildPresets[buildName]
+	if not entry then return {}, 0 end
+	local offsets = getOffsets(entry) or {}
+	local propsList = getPropsList(entry) or {}
+	if #propsList == 0 then return {}, 0 end
+	local availableProps = scanMapProps()
+	local usedProps, matchedCount, missing = {}, 0, {}
+	for idx, data in ipairs(offsets) do
+		local targetGeom = (type(data) == "table") and data.Geom or nil
+		local found = false
+		if targetGeom then
+			local targetSides = targetGeom.Sides or 6
+			local targetSize = Vector3.new(targetGeom.Size[1] or 1, targetGeom.Size[2] or 1, targetGeom.Size[3] or 1)
+			local targetMesh = targetGeom.Mesh or ""
+			for _, prop in ipairs(availableProps) do
+				if not usedProps[prop] then
+					local propGeom = getPropGeometry(prop)
+					if propGeom.Sides == targetSides and (propGeom.Size - targetSize).Magnitude < 0.2 and propGeom.Mesh == targetMesh then
+						usedProps[prop] = true; found = true; matchedCount = matchedCount + 1; break
+					end
+				end
+			end
+		end
+		if not found then
+			local propData = propsList[idx] or propsList[#propsList]
+			if propData then table.insert(missing, { propData = propData, index = idx }) end
+		end
+	end
+	if #propsList > #offsets then
+		for i = #offsets + 1, #propsList do table.insert(missing, { propData = propsList[i], index = i }) end
+	end
+	return missing, matchedCount
+end
+
+local function applyPropColor(prop, color)
+	if not prop or not color then return end
+	local key = tostring(prop:GetDebugId())
+	if lastAppliedColors[key] == tostring(color) then return end
+	lastAppliedColors[key] = tostring(color)
+	task.spawn(function()
+		local crR = prop:FindFirstChild("ChangePropColor", true)
+		if crR then
+			pcall(function()
+				if crR:IsA("RemoteFunction") then crR:InvokeServer(color)
+				elseif crR:IsA("RemoteEvent") then crR:FireServer(color) end
+			end)
+		end
+		for _, child in ipairs(prop:GetDescendants()) do
+			if child.Name == "SetColor" or child.Name == "ChangeColor" or child.Name == "ChangePropColor"
+				or child.Name == "Paint"
+				or (child.Name == "Color" and (child:IsA("RemoteEvent") or child:IsA("RemoteFunction"))) then
+				if child:IsA("RemoteFunction") then pcall(function() child:InvokeServer(color) end)
+				elseif child:IsA("RemoteEvent") then pcall(function() child:FireServer(color) end) end
+			end
+		end
+	end)
+	pcall(function()
+		if prop:IsA("BasePart") then prop.Color = color
+		else
+			for _, part in ipairs(prop:GetDescendants()) do
+				if part:IsA("BasePart") and not part.Name:lower():find("selection") then part.Color = color end
+			end
+		end
+	end)
+end
+
+local function rebindPropsToBuild()
+	boundProps = {}
+	boundPropRemotes = {}
+	local entry = BuildPresets[CurrentBuild]
+	local offsets = getOffsets(entry)
+	if not offsets then return end
+	local availableProps = scanMapProps()
+	local usedProps = {}
+	local function cacheRemote(prop)
+		if not prop then return end
+		local cfR = prop:FindFirstChild("SetCurrentCFrame", true)
+		if cfR then boundPropRemotes[prop] = cfR end
+	end
+	for idx, data in ipairs(offsets) do
+		local targetGeom = (type(data) == "table") and data.Geom or nil
+		if targetGeom then
+			local targetSides = targetGeom.Sides or 6
+			local targetSize = Vector3.new(targetGeom.Size[1] or 1, targetGeom.Size[2] or 1, targetGeom.Size[3] or 1)
+			local targetMesh = targetGeom.Mesh or ""
+			for _, prop in ipairs(availableProps) do
+				if not usedProps[prop] then
+					local propGeom = getPropGeometry(prop)
+					local sizeDiff = (propGeom.Size - targetSize).Magnitude
+					if propGeom.Sides == targetSides and sizeDiff < 0.2 and propGeom.Mesh == targetMesh then
+						usedProps[prop] = true
+						boundProps[idx] = prop
+						cacheRemote(prop)
+						break
+					end
+				end
+			end
+		end
+	end
+	for idx, _ in ipairs(offsets) do
+		if not boundProps[idx] then
+			for _, prop in ipairs(availableProps) do
+				if not usedProps[prop] then
+					usedProps[prop] = true
+					boundProps[idx] = prop
+					cacheRemote(prop)
+					break
+				end
+			end
+		end
+	end
+end
+
+local function saveCustomBuildsToFile()
+	if not writefile then return end
+	local dataToSave = {}
+	for _, name in ipairs(CustomKeys) do
+		local entry = BuildPresets[name]
+		if entry then
+			local offsets = getOffsets(entry) or {}
+			local propsList = getPropsList(entry)
+			local serialBuild = {}
+			for _, item in ipairs(offsets) do
+				if typeof(item) == "table" and item.CF and item.Color then
+					table.insert(serialBuild, {
+						CF = {item.CF:GetComponents()},
+						Color = {item.Color.R, item.Color.G, item.Color.B},
+						Geom = item.Geom or {Sides=6, Size={1,1,1}, Mesh=""}
+					})
+				end
+			end
+			dataToSave[name] = { offsets = serialBuild, propsList = propsList }
+		end
+	end
+	pcall(function() writefile(FILE_NAME, HS:JSONEncode(dataToSave)) end)
+end
+
+local function loadCustomBuildsFromFile()
+	if not readfile or not isfile or not isfile(FILE_NAME) then return end
+	local ok, raw = pcall(function() return readfile(FILE_NAME) end)
+	if not ok or not raw or raw == "" then return end
+	local okDecode, decoded = pcall(function() return HS:JSONDecode(raw) end)
+	if not okDecode or type(decoded) ~= "table" then return end
+	CustomKeys = {}
+	for name, entry in pairs(decoded) do
+		if type(entry) == "table" then
+			local serialOffsets = entry.offsets or entry
+			local propsList = entry.propsList or {}
+			local restoredBuild = {}
+			if type(serialOffsets) == "table" then
+				for _, item in ipairs(serialOffsets) do
+					if item.CF and item.Color then
+						table.insert(restoredBuild, {
+							CF = CFrame.new(unpack(item.CF)),
+							Color = Color3.new(item.Color[1], item.Color[2], item.Color[3]),
+							Geom = item.Geom or {Sides=6, Size={1,1,1}, Mesh=""}
+						})
+					end
+				end
+			end
+			BuildPresets[name] = { offsets = restoredBuild, propsList = propsList }
+			if not table.find(CustomKeys, name) then table.insert(CustomKeys, name) end
+		end
+	end
+end
+
+-- ====================== AUTO COLOCAR (sistema do gravador) ======================
+local function getPlacePos(index, elevated)
+	local char = LP.Character
+	if not char then return nil end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return nil end
+	local row = math.floor((index - 1) / 4)
+	local col = (index - 1) % 4
+	local xOffset = (col - 1.5) * 5
+	local zOffset = 8 + row * 5
+	local yBoost = elevated and (12 + row * 3) or 0
+	local basePos = hrp.Position + hrp.CFrame.LookVector * zOffset + hrp.CFrame.RightVector * xOffset + Vector3.new(0, yBoost, 0)
+	if elevated then return basePos, Workspace.Terrain end
+	local rp = RaycastParams.new()
+	rp.FilterDescendantsInstances = {char}
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	local hit = Workspace:Raycast(basePos + Vector3.new(0, 8, 0), Vector3.new(0, -20, 0), rp)
+	if hit then return hit.Position, hit.Instance end
+	return basePos - Vector3.new(0, 3, 0), Workspace.Terrain
+end
+
+local function equipPropMaker()
+	local char = LP.Character
+	if not char then return nil end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return nil end
+	local tool = char:FindFirstChild("PropMaker")
+	if tool then return tool end
+	local backpack = LP:FindFirstChild("Backpack")
+	if backpack then
+		tool = backpack:FindFirstChild("PropMaker")
+		if tool then
+			humanoid:EquipTool(tool)
+			task.wait(0.25)
+			return char:FindFirstChild("PropMaker")
+		end
+	end
+	return nil
+end
+
+local function placeOneProp(propData, index, elevated)
+	local tool = equipPropMaker()
+	if not tool then return false end
+	local tmake = tool:FindFirstChild("Tool_PropMake")
+	if not tmake then return false end
+	local pos, chao = getPlacePos(index, elevated)
+	if not pos then return false end
+	pcall(function()
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		if remotes and remotes:FindFirstChild("TelemetryClientInteraction") then
+			remotes.TelemetryClientInteraction:FireServer("filterClick", {
+				name = propData.name, itemType = "Props", filter = "All"
+			})
+		end
+	end)
+	task.wait(0.08)
+	pcall(function()
+		local RE = ReplicatedStorage:FindFirstChild("RE")
+		if RE then
+			local clearTools = RE:FindFirstChild("1Clea1rTool1s")
+			if clearTools then
+				clearTools:FireServer("RequestingPropName", propData.name, propData.category)
+			end
+		end
+	end)
+	task.wait(0.18)
+	pcall(function() tmake:FireServer(chao or Workspace.Terrain, pos) end)
+	return true
+end
+
+local placeStatusLbl -- forward
+
+local function deleteLastMapProp()
+	local props = scanMapProps()
+	if #props == 0 then
+		if placeStatusLbl then placeStatusLbl.Text = "Nenhum prop no mapa" end
+		return false
+	end
+	local prop = props[#props]
+	pcall(function()
+		for _, n in ipairs({"DestroyProp", "DeleteProp", "RemoveProp", "Delete"}) do
+			local r = prop:FindFirstChild(n, true)
+			if r then
+				if r:IsA("RemoteEvent") then r:FireServer()
+				elseif r:IsA("RemoteFunction") then r:InvokeServer() end
+			end
+		end
+		prop:Destroy()
+	end)
+	if placeStatusLbl then placeStatusLbl.Text = "Último prop removido" end
+	return true
+end
+
+local function autoPlacePropsList(propsList, buildName)
+	if isPlacing then return end
+	if not propsList or #propsList == 0 then
+		if placeStatusLbl then placeStatusLbl.Text = "Sem lista de props nesta build" end
+		return
+	end
+	local missing, alreadyOk = getMissingProps(buildName)
+	if #missing == 0 then
+		if placeStatusLbl then
+			placeStatusLbl.Text = "Todos os props já estão no mapa (" .. alreadyOk .. ")"
+			task.delay(2.5, function() if placeStatusLbl then placeStatusLbl.Text = "" end end)
+		end
+		return
+	end
+	isPlacing = true
+	task.spawn(function()
+		if placeStatusLbl then placeStatusLbl.Text = ("Faltam %d prop(s)..."):format(#missing) end
+		for i, item in ipairs(missing) do
+			if not isPlacing then break end
+			if placeStatusLbl then
+				placeStatusLbl.Text = ("Colocando faltante %d/%d: %s"):format(i, #missing, item.propData.name)
+			end
+			placeOneProp(item.propData, i, true)
+			task.wait(0.85)
+		end
+		-- remove o último prop colocado (cópia extra)
+		task.wait(0.3)
+		deleteLastMapProp()
+		isPlacing = false
+		task.wait(0.35)
+		rebindPropsToBuild()
+		if placeStatusLbl then
+			placeStatusLbl.Text = ("Pronto: +%d | já tinha %d"):format(#missing, alreadyOk)
+			task.wait(2.5)
+			placeStatusLbl.Text = ""
+		end
+	end)
+end
+
+-- UI
+local CONTENT_WIDTH, BTN_H, BTN_H_SM, PAD_Y = 0.90, 20, 17, 3
+local function applyStyle(inst, r, hasStroke, col)
+	if r then local c = inst:FindFirstChildOfClass("UICorner") or Instance.new("UICorner") c.CornerRadius = UDim.new(0,r) c.Parent = inst end
+	if hasStroke then
+		local s = inst:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+		s.Color = col or STYLES.StrokeColor
+		s.Thickness = 1
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = inst
+	end
+end
+local function createStyledBtn(text, parent, h, strokeCol)
+	local btn = Instance.new("TextButton")
+	btn.Text, btn.Size = text, UDim2.new(CONTENT_WIDTH,0,0,h or BTN_H)
+	btn.BackgroundColor3, btn.TextColor3 = STYLES.CardColor, STYLES.TextColor
+	btn.Font, btn.TextSize, btn.TextWrapped, btn.AutoButtonColor = Enum.Font.SourceSansBold, 10, true, true
+	btn.Parent = parent
+	applyStyle(btn, 4, true, strokeCol)
+	return btn
+end
+local function createLabel(text, parent, h, fs)
+	local lbl = Instance.new("TextLabel")
+	lbl.Text, lbl.Size = text, UDim2.new(CONTENT_WIDTH,0,0,h or 14)
+	lbl.BackgroundTransparency, lbl.TextColor3 = 1, STYLES.TextColor
+	lbl.Font, lbl.TextSize, lbl.TextWrapped, lbl.TextXAlignment = Enum.Font.SourceSans, fs or 10, true, Enum.TextXAlignment.Center
+	lbl.Parent = parent
+	return lbl
+end
+
+local page = Instance.new("ScrollingFrame")
+page.Name = "Page_SALVAS"
+page.Size = UDim2.new(1,-10,1,-28)
+page.Position = UDim2.new(0,5,0,22)
+page.BackgroundTransparency = 1
+page.BorderSizePixel = 0
+page.ScrollBarThickness = 3
+page.ScrollBarImageColor3 = STYLES.StrokeColor
+page.CanvasSize = UDim2.new(0,0,0,0)
+page.Visible = true
+page.Parent = tela
+abyssShowPage("SALVAS", page)
+
+local pad = Instance.new("UIPadding")
+pad.PaddingTop = UDim.new(0,2) pad.PaddingBottom = UDim.new(0,8)
+pad.PaddingLeft = UDim.new(0,6) pad.PaddingRight = UDim.new(0,6)
+pad.Parent = page
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, PAD_Y)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = page
+layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	page.CanvasSize = UDim2.new(0,0,0, layout.AbsoluteContentSize.Y + 12)
+end)
+
+createLabel("Builds salvas", page, 14, 9)
+placeStatusLbl = createLabel("", page, 12, 8)
+placeStatusLbl.TextColor3 = STYLES.SelectNeon
+
+local subTabBarSalvas = Instance.new("Frame")
+subTabBarSalvas.Name = "SubTabBar"
+subTabBarSalvas.Size = UDim2.new(CONTENT_WIDTH,0,0,16)
+subTabBarSalvas.BackgroundTransparency = 1
+subTabBarSalvas.Visible = false
+subTabBarSalvas.Parent = page
+
+local subTabLayout = Instance.new("UIListLayout")
+subTabLayout.FillDirection = Enum.FillDirection.Horizontal
+subTabLayout.Padding = UDim.new(0,2)
+subTabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+subTabLayout.Parent = subTabBarSalvas
+
+local listContainerSalvas = Instance.new("Frame")
+listContainerSalvas.Name = "ListContainer"
+listContainerSalvas.Size = UDim2.new(CONTENT_WIDTH,0,0,0)
+listContainerSalvas.BackgroundTransparency = 1
+listContainerSalvas.AutomaticSize = Enum.AutomaticSize.Y
+listContainerSalvas.Parent = page
+
+local currentPageIndex = 1
+local MAX_PER_PAGE = 5
+local pendingDeleteName = nil
+
+-- Confirm delete UI
+local confirmFrame = Instance.new("Frame")
+confirmFrame.Name = "ConfirmDeleteBuild"
+confirmFrame.Size = UDim2.new(0.88, 0, 0, 72)
+confirmFrame.Position = UDim2.new(0.06, 0, 0.32, 0)
+confirmFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+confirmFrame.Visible = false
+confirmFrame.ZIndex = 50
+confirmFrame.Parent = tela
+applyStyle(confirmFrame, 8, true, STYLES.RedColor)
+
+local confirmLbl = Instance.new("TextLabel")
+confirmLbl.Size = UDim2.new(1, -8, 0, 28)
+confirmLbl.Position = UDim2.new(0, 4, 0, 4)
+confirmLbl.BackgroundTransparency = 1
+confirmLbl.TextColor3 = STYLES.TextColor
+confirmLbl.Font = Enum.Font.SourceSansBold
+confirmLbl.TextSize = 10
+confirmLbl.TextWrapped = true
+confirmLbl.Text = "Excluir build?"
+confirmLbl.ZIndex = 51
+confirmLbl.Parent = confirmFrame
+
+local confirmYes = Instance.new("TextButton")
+confirmYes.Text = "SIM"
+confirmYes.Size = UDim2.new(0.42, 0, 0, 22)
+confirmYes.Position = UDim2.new(0.05, 0, 0, 38)
+confirmYes.BackgroundColor3 = STYLES.RedColor
+confirmYes.TextColor3 = Color3.new(1,1,1)
+confirmYes.Font = Enum.Font.SourceSansBold
+confirmYes.TextSize = 11
+confirmYes.ZIndex = 51
+confirmYes.Parent = confirmFrame
+applyStyle(confirmYes, 4, true)
+
+local confirmNo = Instance.new("TextButton")
+confirmNo.Text = "NÃO"
+confirmNo.Size = UDim2.new(0.42, 0, 0, 22)
+confirmNo.Position = UDim2.new(0.53, 0, 0, 38)
+confirmNo.BackgroundColor3 = STYLES.GreenColor
+confirmNo.TextColor3 = Color3.new(1,1,1)
+confirmNo.Font = Enum.Font.SourceSansBold
+confirmNo.TextSize = 11
+confirmNo.ZIndex = 51
+confirmNo.Parent = confirmFrame
+applyStyle(confirmNo, 4, true)
+
+local function closeConfirm()
+	pendingDeleteName = nil
+	confirmFrame.Visible = false
+end
+
+confirmNo.MouseButton1Click:Connect(closeConfirm)
+
+local renderSavedBuildsList
+
+confirmYes.MouseButton1Click:Connect(function()
+	if not pendingDeleteName then closeConfirm() return end
+	local name = pendingDeleteName
+	closeConfirm()
+	BuildPresets[name] = nil
+	for j, k in ipairs(CustomKeys) do
+		if k == name then table.remove(CustomKeys, j) break end
+	end
+	saveCustomBuildsToFile()
+	if renderSavedBuildsList then renderSavedBuildsList() end
+end)
+
+renderSavedBuildsList = function()
+	for _, c in ipairs(listContainerSalvas:GetChildren()) do c:Destroy() end
+	for _, c in ipairs(subTabBarSalvas:GetChildren()) do
+		if not c:IsA("UIListLayout") then c:Destroy() end
+	end
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Padding = UDim.new(0,2)
+	listLayout.Parent = listContainerSalvas
+
+	local totalBuilds = #CustomKeys
+	local totalPages = math.max(1, math.ceil(totalBuilds / MAX_PER_PAGE))
+	if currentPageIndex > totalPages then currentPageIndex = totalPages end
+
+	if totalPages > 1 then
+		subTabBarSalvas.Visible = true
+		for p = 1, totalPages do
+			local pageBtn = Instance.new("TextButton")
+			pageBtn.Text = "Aba " .. p
+			pageBtn.Size = UDim2.new(1/totalPages, -2, 1, 0)
+			pageBtn.BackgroundColor3 = (p == currentPageIndex) and STYLES.AccentColor or STYLES.CardColor
+			pageBtn.TextColor3 = STYLES.TextColor
+			pageBtn.Font = Enum.Font.SourceSansBold
+			pageBtn.TextSize = 8
+			pageBtn.Parent = subTabBarSalvas
+			applyStyle(pageBtn, 3, true)
+			pageBtn.MouseButton1Click:Connect(function()
+				currentPageIndex = p
+				renderSavedBuildsList()
+			end)
+		end
+	else
+		subTabBarSalvas.Visible = false
+	end
+
+	local startIdx = (currentPageIndex - 1) * MAX_PER_PAGE + 1
+	local endIdx = math.min(startIdx + MAX_PER_PAGE - 1, totalBuilds)
+
+	if totalBuilds == 0 then
+		local empty = Instance.new("TextLabel")
+		empty.Text = "Nenhuma build salva"
+		empty.Size = UDim2.new(1,0,0,20)
+		empty.BackgroundTransparency = 1
+		empty.TextColor3 = STYLES.TextColor
+		empty.Font = Enum.Font.SourceSans
+		empty.TextSize = 10
+		empty.Parent = listContainerSalvas
+		return
+	end
+
+	for i = startIdx, endIdx do
+		local name = CustomKeys[i]
+		local entry = BuildPresets[name]
+		local nProps = #getPropsList(entry)
+
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(1,0,0,26)
+		card.BackgroundColor3 = STYLES.CardColor
+		card.Parent = listContainerSalvas
+		applyStyle(card, 4, true)
+
+		local nameLbl = Instance.new("TextLabel")
+		nameLbl.Text = name .. (nProps > 0 and (" (" .. nProps .. ")") or "")
+		nameLbl.Size = UDim2.new(0.40,0,1,0)
+		nameLbl.BackgroundTransparency = 1
+		nameLbl.TextColor3 = STYLES.TextColor
+		nameLbl.Font = Enum.Font.SourceSansBold
+		nameLbl.TextSize = 8
+		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+		nameLbl.Parent = card
+		local padL = Instance.new("UIPadding")
+		padL.PaddingLeft = UDim.new(0,3)
+		padL.Parent = nameLbl
+
+		-- ▶ carregar pose
+		local loadBtn = Instance.new("TextButton")
+		loadBtn.Text = "▶"
+		loadBtn.Size = UDim2.new(0.13,0,0.75,0)
+		loadBtn.Position = UDim2.new(0.40,0,0.12,0)
+		loadBtn.BackgroundColor3 = STYLES.GreenColor
+		loadBtn.TextColor3 = STYLES.TextColor
+		loadBtn.Font = Enum.Font.SourceSansBold
+		loadBtn.TextSize = 10
+		loadBtn.Parent = card
+		applyStyle(loadBtn, 3, true)
+		loadBtn.MouseButton1Click:Connect(function()
+			CurrentBuild = name
+			petMode = true
+			lastAppliedColors = {}
+			rebindPropsToBuild()
+			_G.AbyssShared.CurrentBuild = name
+			_G.AbyssShared.petMode = true
+			task.delay(0.35, function()
+				rebindPropsToBuild()
+			end)
+			loadBtn.Text = "✅"
+			task.wait(0.8)
+			loadBtn.Text = "▶"
+		end)
+
+		-- 📦 clique = auto-colocar | segurar = regravar lista
+		local placeBtn = Instance.new("TextButton")
+		placeBtn.Text = "📦"
+		placeBtn.Size = UDim2.new(0.13,0,0.75,0)
+		placeBtn.Position = UDim2.new(0.54,0,0.12,0)
+		placeBtn.BackgroundColor3 = STYLES.SelectNeon
+		placeBtn.TextColor3 = Color3.fromRGB(20,20,20)
+		placeBtn.Font = Enum.Font.SourceSansBold
+		placeBtn.TextSize = 10
+		placeBtn.Parent = card
+		placeBtn.ClipsDescendants = true
+		applyStyle(placeBtn, 3, true)
+
+		local holdRing = Instance.new("Frame")
+		holdRing.Size = UDim2.new(0,0,0,0)
+		holdRing.Position = UDim2.new(0.5,0,0.5,0)
+		holdRing.AnchorPoint = Vector2.new(0.5,0.5)
+		holdRing.BackgroundColor3 = Color3.fromRGB(255,255,255)
+		holdRing.BackgroundTransparency = 0.35
+		holdRing.BorderSizePixel = 0
+		holdRing.ZIndex = 5
+		holdRing.Visible = false
+		holdRing.Parent = placeBtn
+		Instance.new("UICorner", holdRing).CornerRadius = UDim.new(1,0)
+
+		local HOLD_TIME, holding, holdStart, holdConn, longPressDone = 0.85, false, 0, nil, false
+		local function stopHoldVisual()
+			holding = false; longPressDone = false
+			if holdConn then holdConn:Disconnect() holdConn = nil end
+			holdRing.Visible = false; holdRing.Size = UDim2.new(0,0,0,0)
+		end
+
+		placeBtn.MouseButton1Down:Connect(function()
+			holding = true; longPressDone = false; holdStart = tick()
+			holdRing.Visible = true; holdRing.Size = UDim2.new(0,0,0,0)
+			if holdConn then holdConn:Disconnect() end
+			holdConn = game:GetService("RunService").Heartbeat:Connect(function()
+				if not holding then return end
+				local t = (tick() - holdStart) / HOLD_TIME
+				if t >= 1 then
+					longPressDone = true; holding = false
+					if holdConn then holdConn:Disconnect() holdConn = nil end
+					holdRing.Size = UDim2.new(1.2,0,1.2,0)
+					_G.AbyssReRecordProps = { buildName = name }
+					if placeStatusLbl then placeStatusLbl.Text = "Regravar lista: " .. name end
+					local criarPage = tela:FindFirstChild("Page_CRIATIVO")
+						or (_G.AbyssDIETabs and _G.AbyssDIETabs.pages and _G.AbyssDIETabs.pages["CRIATIVO"])
+					if criarPage then abyssShowPage("CRIATIVO", criarPage) end
+					task.defer(function()
+						if _G.AbyssStartReRecord then pcall(_G.AbyssStartReRecord) end
+					end)
+					task.delay(0.25, stopHoldVisual)
+				else
+					holdRing.Size = UDim2.new(t*1.2, 0, t*1.2, 0)
+				end
+			end)
+		end)
+		placeBtn.MouseButton1Up:Connect(function()
+			if longPressDone then stopHoldVisual() return end
+			local heldFor = tick() - holdStart
+			stopHoldVisual()
+			if heldFor < HOLD_TIME then
+				local list = getPropsList(BuildPresets[name])
+				if #list == 0 then
+					if placeStatusLbl then placeStatusLbl.Text = "Build sem lista (segure 📦 pra gravar)" end
+					return
+				end
+				if isPlacing then
+					isPlacing = false
+					if placeStatusLbl then placeStatusLbl.Text = "Cancelado" end
+					return
+				end
+				autoPlacePropsList(list, name)
+			end
+		end)
+		placeBtn.MouseLeave:Connect(function()
+			if holding and not longPressDone then stopHoldVisual() end
+		end)
+
+		-- − remove último prop do mapa
+		local remLastBtn = Instance.new("TextButton")
+		remLastBtn.Text = "−"
+		remLastBtn.Size = UDim2.new(0.12,0,0.75,0)
+		remLastBtn.Position = UDim2.new(0.68,0,0.12,0)
+		remLastBtn.BackgroundColor3 = Color3.fromRGB(180, 120, 40)
+		remLastBtn.TextColor3 = STYLES.TextColor
+		remLastBtn.Font = Enum.Font.SourceSansBold
+		remLastBtn.TextSize = 14
+		remLastBtn.Parent = card
+		applyStyle(remLastBtn, 3, true)
+		remLastBtn.MouseButton1Click:Connect(function()
+			deleteLastMapProp()
+			task.delay(0.3, function() rebindPropsToBuild() end)
+		end)
+
+		-- ❌ excluir build
+		local delBtn = Instance.new("TextButton")
+		delBtn.Text = "❌"
+		delBtn.Size = UDim2.new(0.13,0,0.75,0)
+		delBtn.Position = UDim2.new(0.81,0,0.12,0)
+		delBtn.BackgroundColor3 = STYLES.RedColor
+		delBtn.TextColor3 = STYLES.TextColor
+		delBtn.Font = Enum.Font.SourceSansBold
+		delBtn.TextSize = 9
+		delBtn.Parent = card
+		applyStyle(delBtn, 3, true)
+		delBtn.MouseButton1Click:Connect(function()
+			pendingDeleteName = name
+			confirmLbl.Text = 'Excluir "' .. name .. '"?'
+			confirmFrame.Visible = true
+		end)
+	end
+end
+
+createLabel("▶ pose  📦 auto  − último  ❌ excluir", page, 12, 8)
+createLabel("Segure 📦 p/ regravar | − remove último prop", page, 12, 8)
+createLabel("(Salvas v2 completo)", page, 12, 8)
+
+loadCustomBuildsFromFile()
+loadAnimationsFromFile()
+renderSavedBuildsList()
+
+local hitSalvas = base:FindFirstChild("abas de salvas")
+if hitSalvas then
+	local hb = hitSalvas:FindFirstChild("Hitbox")
+	if hb then hb.MouseButton1Click:Connect(function()
+		abyssShowPage("SALVAS", page)
+		loadCustomBuildsFromFile()
+		loadAnimationsFromFile()
+		renderSavedBuildsList()
+	end) end
+end
+
+if page then applyThemeToPage(page) end
+
+-- ====================== FOLLOW + ANIMAÇÃO + COR (método ybyss) ======================
+local RS = game:GetService("RunService")
+RS.Heartbeat:Connect(function()
+	-- lê sinais da aba Ajustes (pet / escala / alvo)
+	local s = _G.AbyssShared
+	if s then
+		if s.petMode ~= nil then petMode = s.petMode end
+		if s.buildScale then buildScale = s.buildScale end
+		if s.followTargetName and Players:FindFirstChild(s.followTargetName) then
+			followTargetPlayer = Players[s.followTargetName]
+		end
+	end
+	if not petMode then return end
+	local entry = BuildPresets[CurrentBuild]
+	local offsets = getOffsets(entry)
+	if not offsets then return end
+
+	local targetPlr = followTargetPlayer or LP
+	local character = targetPlr and targetPlr.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local hum = character and character:FindFirstChildOfClass("Humanoid")
+	if not root then return end
+
+	local baseCF = root.CFrame
+	local scale = buildScale or 1
+	local totalOffsets = #offsets
+
+	local isMoving = hum and hum.MoveDirection.Magnitude > 0.1
+	local currentAnimKeyframeList = nil
+	if activeEmoteAnim then
+		currentAnimKeyframeList = activeEmoteAnim
+		if tick() - activeEmoteTime > 5 then activeEmoteAnim = nil end
+	elseif isMoving and BuildAnimations[CurrentBuild] and BuildAnimations[CurrentBuild].Walk then
+		local n = ActiveAnimations[CurrentBuild] and ActiveAnimations[CurrentBuild].Walk
+		if n and BuildAnimations[CurrentBuild].Walk[n] then currentAnimKeyframeList = BuildAnimations[CurrentBuild].Walk[n] end
+	elseif not isMoving and BuildAnimations[CurrentBuild] and BuildAnimations[CurrentBuild].Idle then
+		local n = ActiveAnimations[CurrentBuild] and ActiveAnimations[CurrentBuild].Idle
+		if n and BuildAnimations[CurrentBuild].Idle[n] then currentAnimKeyframeList = BuildAnimations[CurrentBuild].Idle[n] end
+	end
+
+	local activeFrame = nil
+	if currentAnimKeyframeList and #currentAnimKeyframeList > 0 then
+		activeFrame = currentAnimKeyframeList[(math.floor(tick() * 4) % #currentAnimKeyframeList) + 1]
+	end
+
+	for idx, prop in pairs(boundProps) do
+		if prop and prop.Parent and not isCharacterOrPlayer(prop) then
+			local targetCF, itemColor
+			if idx <= totalOffsets then
+				local data = offsets[idx]
+				local relCF
+				if typeof(data) == "Vector3" then relCF = CFrame.new(data)
+				elseif typeof(data) == "CFrame" then relCF = data
+				elseif typeof(data) == "table" then
+					relCF = data.CF or CFrame.new()
+					itemColor = data.Color
+				end
+				if activeFrame and activeFrame[idx] then relCF = activeFrame[idx] end
+				if relCF then
+					targetCF = baseCF * CFrame.new(relCF.Position * scale) * relCF.Rotation
+				end
+			else
+				local e = idx - totalOffsets
+				targetCF = baseCF * CFrame.new(0, 3 + e * 0.5, 2 + e * 0.2)
+			end
+			if targetCF then
+				local cfR = boundPropRemotes[prop]
+				if not cfR then
+					cfR = prop:FindFirstChild("SetCurrentCFrame", true)
+					if cfR then boundPropRemotes[prop] = cfR end
+				end
+				if cfR then
+					task.spawn(function()
+						pcall(function()
+							if cfR:IsA("RemoteFunction") then cfR:InvokeServer(targetCF)
+							elseif cfR:IsA("RemoteEvent") then cfR:FireServer(targetCF) end
+						end)
+					end)
+				end
+				if itemColor then applyPropColor(prop, itemColor) end
+			end
+		end
+	end
+end)
+
+print("Abyss DIE — Aba SALVAS v2 (sync+anim+faltantes+longpress)")
