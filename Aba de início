@@ -117,7 +117,10 @@ end
 local OwnerName = LP.Name
 local petMode = false
 local buildScale = 1
--- estado do anti-seat persiste entre troca de aba / re-execução
+-- estado único do anti-seat (não trava ao trocar/reexecutar)
+if _G.AbyssShared and _G.AbyssShared.antiSeatEnabled == nil then
+	_G.AbyssShared.antiSeatEnabled = false
+end
 local antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
 local boundProps = {}
 local boundPropRemotes = {}
@@ -358,19 +361,23 @@ end)
 local AntiSeatBtn = createStyledBtn("🚫 ANTI-SEAT: OFF", page, BTN_H, STYLES.RedColor)
 
 local function updateAntiSeatState()
+	local enabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
+	antiSeatEnabled = enabled
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, not antiSeatEnabled)
-		if antiSeatEnabled and hum.Sit then
-			hum.Sit = false
-		end
+	if not hum then return end
+	if enabled then
+		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+		if hum.Sit then hum.Sit = false end
+		pcall(function() hum.SeatPart = nil end)
+	else
+		-- desligar de verdade: libera sentar de novo
+		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
 	end
 end
 
 local function syncAntiSeatBtn()
-	-- sempre lê o estado compartilhado pra não dessincronizar ao voltar na aba
-	antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or antiSeatEnabled
+	antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
 	if antiSeatEnabled then
 		AntiSeatBtn.Text = "✅ ANTI-SEAT: ON"
 		AntiSeatBtn.BackgroundColor3 = STYLES.GreenColor
@@ -378,24 +385,29 @@ local function syncAntiSeatBtn()
 		AntiSeatBtn.Text = "🚫 ANTI-SEAT: OFF"
 		AntiSeatBtn.BackgroundColor3 = STYLES.CardColor
 	end
-	updateAntiSeatState()
 end
 
 AntiSeatBtn.MouseButton1Click:Connect(function()
-	antiSeatEnabled = not antiSeatEnabled
-	_G.AbyssShared.antiSeatEnabled = antiSeatEnabled
+	local now = not ((_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false)
+	_G.AbyssShared.antiSeatEnabled = now
+	antiSeatEnabled = now
 	syncAntiSeatBtn()
+	updateAntiSeatState() -- aplica ON ou OFF na hora
 end)
 
--- restaura visual + efeito ao carregar a aba
 syncAntiSeatBtn()
+updateAntiSeatState()
 
 createLabel("Detecção geométrica • até 15 props\nClique no preset para trocar", page, 28, 9)
 createLabel("(Aba Início isolada)", page, 14, 8)
 
--- Anti-seat loop
-RS.Heartbeat:Connect(function()
-	if antiSeatEnabled then
+-- Anti-seat loop (desconecta o antigo pra não empilhar e travar)
+if _G.AbyssAntiSeatConn then
+	pcall(function() _G.AbyssAntiSeatConn:Disconnect() end)
+	_G.AbyssAntiSeatConn = nil
+end
+_G.AbyssAntiSeatConn = RS.Heartbeat:Connect(function()
+	if _G.AbyssShared and _G.AbyssShared.antiSeatEnabled then
 		updateAntiSeatState()
 	end
 end)
@@ -450,9 +462,8 @@ if hitInicio then
 	local hb = hitInicio:FindFirstChild("Hitbox")
 	if hb then hb.MouseButton1Click:Connect(function()
 		abyssShowPage("PADRAO", page)
-		-- reaplica tema e re-sincroniza o botão anti-seat
 		if applyThemeToPage then pcall(applyThemeToPage, page) end
-		syncAntiSeatBtn()
+		syncAntiSeatBtn() -- botão volta no estado certo (ON/OFF)
 	end) end
 end
 
