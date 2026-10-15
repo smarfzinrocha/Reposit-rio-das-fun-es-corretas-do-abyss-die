@@ -6,6 +6,8 @@ local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 local RS = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local dieGui = CoreGui:WaitForChild("DIE_Interface", 10)
 if not dieGui then warn("DIE não encontrado!") return end
@@ -24,11 +26,7 @@ _G.AbyssShared = _G.AbyssShared or {
 	buildScale = 1,
 	followTargetName = LP.Name,
 	CurrentBuild = "B2_Spirit",
-	antiSeatEnabled = false,
 }
-if _G.AbyssShared.antiSeatEnabled == nil then
-	_G.AbyssShared.antiSeatEnabled = false
-end
 
 local function abyssShowPage(pageName, pg)
 	if pg and pg.Parent then _G.AbyssDIETabs.pages[pageName] = pg end
@@ -117,11 +115,7 @@ end
 local OwnerName = LP.Name
 local petMode = false
 local buildScale = 1
--- estado único do anti-seat (não trava ao trocar/reexecutar)
-if _G.AbyssShared and _G.AbyssShared.antiSeatEnabled == nil then
-	_G.AbyssShared.antiSeatEnabled = false
-end
-local antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
+local antiSeatEnabled = false
 local boundProps = {}
 local boundPropRemotes = {}
 local lastAppliedColors = {}
@@ -361,23 +355,18 @@ end)
 local AntiSeatBtn = createStyledBtn("🚫 ANTI-SEAT: OFF", page, BTN_H, STYLES.RedColor)
 
 local function updateAntiSeatState()
-	local enabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
-	antiSeatEnabled = enabled
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not hum then return end
-	if enabled then
-		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-		if hum.Sit then hum.Sit = false end
-		pcall(function() hum.SeatPart = nil end)
-	else
-		-- desligar de verdade: libera sentar de novo
-		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+	if hum then
+		hum:SetStateEnabled(Enum.HumanoidStateType.Seated, not antiSeatEnabled)
+		if antiSeatEnabled and hum.Sit then
+			hum.Sit = false
+		end
 	end
 end
 
-local function syncAntiSeatBtn()
-	antiSeatEnabled = (_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false
+AntiSeatBtn.MouseButton1Click:Connect(function()
+	antiSeatEnabled = not antiSeatEnabled
 	if antiSeatEnabled then
 		AntiSeatBtn.Text = "✅ ANTI-SEAT: ON"
 		AntiSeatBtn.BackgroundColor3 = STYLES.GreenColor
@@ -385,29 +374,519 @@ local function syncAntiSeatBtn()
 		AntiSeatBtn.Text = "🚫 ANTI-SEAT: OFF"
 		AntiSeatBtn.BackgroundColor3 = STYLES.CardColor
 	end
-end
-
-AntiSeatBtn.MouseButton1Click:Connect(function()
-	local now = not ((_G.AbyssShared and _G.AbyssShared.antiSeatEnabled) or false)
-	_G.AbyssShared.antiSeatEnabled = now
-	antiSeatEnabled = now
-	syncAntiSeatBtn()
-	updateAntiSeatState() -- aplica ON ou OFF na hora
+	updateAntiSeatState()
 end)
 
-syncAntiSeatBtn()
-updateAntiSeatState()
+-- ====================== ASSENTO: PUXAR / MATAR ======================
+local SEAT_PROPS = {
+	{ name = "FurnitureCouchBrown", category = "Furniture", label = "Sofá Marrom" },
+	{ name = "CastleFancyBed", category = "Furniture", label = "Cama Fancy" },
+	{ name = "FurnitureBleachers", category = "Furniture", label = "Arquibancada" },
+	{ name = "Summer2026SlipAndSlide", category = "Carnival", label = "Tobogã 2026" },
+	{ name = "Summer2026Trampoline", category = "Carnival", label = "Trampolim 2026" },
+}
+local seatPropIndex = 1
+local seatMode = "puxar" -- "puxar" | "matar"
+local seatSelected = {} -- [Player] = true (multi-select, até 15)
+local seatTrapProps = {} -- { prop, mode, used, targetPlr, pulling }
+local seatSpawning = false
+local seatArmed = false -- só age depois do botão ATIVAR
+local seatStatusLbl
+local SeatArmBtn -- forward
+local seatPropRemotes = {}
+
+local function seatSelectedCount()
+	local n = 0
+	for plr in pairs(seatSelected) do
+		if plr and plr.Parent then n = n + 1 else seatSelected[plr] = nil end
+	end
+	return n
+end
+
+local function seatGetSelectedList()
+	local list = {}
+	for plr in pairs(seatSelected) do
+		if plr and plr.Parent and plr ~= LP then
+			table.insert(list, plr)
+		end
+	end
+	return list
+end
+
+-- spawn no AR (método Salvas elevated) pra não sobrepor
+local function seatGetPlacePos(index)
+	local char = LP.Character
+	if not char then return nil end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return nil end
+	local row = math.floor((index - 1) / 4)
+	local col = (index - 1) % 4
+	local xOffset = (col - 1.5) * 5
+	local zOffset = 8 + row * 5
+	local yBoost = 12 + row * 3 -- no ar
+	local basePos = hrp.Position + hrp.CFrame.LookVector * zOffset + hrp.CFrame.RightVector * xOffset + Vector3.new(0, yBoost, 0)
+	return basePos, Workspace.Terrain
+end
+
+local function seatEquipPropMaker()
+	local char = LP.Character
+	if not char then return nil end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return nil end
+	local tool = char:FindFirstChild("PropMaker")
+	if tool then return tool end
+	local backpack = LP:FindFirstChild("Backpack")
+	if backpack then
+		tool = backpack:FindFirstChild("PropMaker")
+		if tool then
+			humanoid:EquipTool(tool)
+			task.wait(0.25)
+			return char:FindFirstChild("PropMaker")
+		end
+	end
+	return nil
+end
+
+local function seatPlaceOneProp(propData, index)
+	local tool = seatEquipPropMaker()
+	if not tool then return false end
+	local tmake = tool:FindFirstChild("Tool_PropMake")
+	if not tmake then return false end
+	local pos, chao = seatGetPlacePos(index)
+	if not pos then return false end
+	pcall(function()
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		if remotes and remotes:FindFirstChild("TelemetryClientInteraction") then
+			remotes.TelemetryClientInteraction:FireServer("filterClick", {
+				name = propData.name, itemType = "Props", filter = "All"
+			})
+		end
+	end)
+	task.wait(0.08)
+	pcall(function()
+		local RE = ReplicatedStorage:FindFirstChild("RE")
+		if RE then
+			local clearTools = RE:FindFirstChild("1Clea1rTool1s")
+			if clearTools then
+				clearTools:FireServer("RequestingPropName", propData.name, propData.category)
+			end
+		end
+	end)
+	task.wait(0.18)
+	pcall(function() tmake:FireServer(chao or Workspace.Terrain, pos) end)
+	return true
+end
+
+local function seatGetCFRemote(prop)
+	if not prop then return nil end
+	local cached = seatPropRemotes[prop]
+	if cached and cached.Parent then return cached end
+	local cfR = prop:FindFirstChild("SetCurrentCFrame", true)
+	if cfR then seatPropRemotes[prop] = cfR end
+	return cfR
+end
+
+local function seatMoveProp(prop, targetCF)
+	if not prop or not prop.Parent then return end
+	pcall(function()
+		if prop:IsA("Model") then prop:PivotTo(targetCF)
+		elseif prop:IsA("BasePart") then prop.CFrame = targetCF end
+	end)
+	local cfR = seatGetCFRemote(prop)
+	if cfR then
+		task.spawn(function()
+			pcall(function()
+				if cfR:IsA("RemoteEvent") then cfR:FireServer(targetCF)
+				elseif cfR:IsA("RemoteFunction") then cfR:InvokeServer(targetCF) end
+			end)
+		end)
+	end
+end
+
+local function seatDeleteProp(prop)
+	if not prop then return end
+	pcall(function()
+		if prop.Parent then
+			for _, n in ipairs({ "DestroyProp", "DeleteProp", "RemoveProp", "Delete", "Tool_PropDelete" }) do
+				local r = prop:FindFirstChild(n, true)
+				if r then
+					if r:IsA("RemoteEvent") then r:FireServer()
+					elseif r:IsA("RemoteFunction") then r:InvokeServer() end
+				end
+			end
+			-- tenta via RE global do jogo
+			local RE = ReplicatedStorage:FindFirstChild("RE")
+			if RE then
+				for _, child in ipairs(RE:GetChildren()) do
+					local ln = string.lower(child.Name)
+					if ln:find("delete", 1, true) or ln:find("destroy", 1, true) or ln:find("remove", 1, true) then
+						pcall(function()
+							if child:IsA("RemoteEvent") then child:FireServer(prop)
+							elseif child:IsA("RemoteFunction") then child:InvokeServer(prop) end
+						end)
+					end
+				end
+			end
+			prop:Destroy()
+		end
+	end)
+end
+
+local function seatIsOurTrap(seatPart)
+	if not seatPart then return nil end
+	for _, entry in ipairs(seatTrapProps) do
+		if not entry.used and entry.prop and entry.prop.Parent then
+			if seatPart == entry.prop or seatPart:IsDescendantOf(entry.prop) then
+				return entry
+			end
+			local anc = seatPart
+			for _ = 1, 8 do
+				if not anc then break end
+				if anc == entry.prop then return entry end
+				anc = anc.Parent
+			end
+		end
+	end
+	return nil
+end
+
+local function seatTrigger(entry, victimPlr)
+	if not entry or entry.used then return end
+	if entry.targetPlr and victimPlr and entry.targetPlr ~= victimPlr then return end
+	entry.used = true
+	local prop = entry.prop
+	if not prop or not prop.Parent then return end
+
+	if entry.mode == "matar" then
+		local voidCF = CFrame.new(0, -800, 0)
+		seatMoveProp(prop, voidCF)
+		task.defer(function()
+			task.wait(0.05)
+			seatDeleteProp(prop)
+		end)
+		if seatStatusLbl then seatStatusLbl.Text = "💀 Matou: " .. (victimPlr and victimPlr.Name or "?") end
+	else
+		entry.pulling = true
+		local myChar = LP.Character
+		local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if myHRP then
+			seatMoveProp(prop, myHRP.CFrame * CFrame.new(0, 0, -4))
+		end
+		if seatStatusLbl then seatStatusLbl.Text = "🧲 Puxou: " .. (victimPlr and victimPlr.Name or "?") end
+	end
+end
+
+-- FLING: prop DENTRO do player girando louco até sentar
+if _G.AbyssSeatTrapConn then pcall(function() _G.AbyssSeatTrapConn:Disconnect() end) end
+_G.AbyssSeatTrapConn = RS.Heartbeat:Connect(function()
+	if not seatArmed then return end
+	if #seatTrapProps == 0 then return end
+
+	local myChar = LP.Character
+	local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	local t = tick()
+	-- rotação tipo fling (bem rápida)
+	local sx = t * 40
+	local sy = t * 55
+	local sz = t * 35
+
+	for _, entry in ipairs(seatTrapProps) do
+		local prop = entry and entry.prop
+		if prop and prop.Parent then
+			if entry.pulling then
+				if myHRP then
+					seatMoveProp(prop, myHRP.CFrame * CFrame.new(0, 0, -3))
+					local propPos
+					pcall(function()
+						if prop:IsA("Model") then propPos = prop:GetPivot().Position
+						elseif prop:IsA("BasePart") then propPos = prop.Position end
+					end)
+					if propPos and (propPos - myHRP.Position).Magnitude < 10 then
+						seatDeleteProp(prop)
+						entry.prop = nil
+						entry.pulling = false
+						if seatStatusLbl then seatStatusLbl.Text = "🧲 Chegou — prop removido" end
+					end
+				end
+			elseif not entry.used then
+				local target = entry.targetPlr
+				if target and target.Parent then
+					local tChar = target.Character
+					local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+					if tRoot then
+						-- BEM DENTRO do player + giro fling
+						local flingCF = CFrame.new(tRoot.Position)
+							* CFrame.Angles(sx, sy, sz)
+						seatMoveProp(prop, flingCF)
+					end
+				end
+			end
+		end
+	end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LP then
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Sit and hum.SeatPart then
+				local entry = seatIsOurTrap(hum.SeatPart)
+				if entry then
+					seatTrigger(entry, plr)
+				end
+			end
+		end
+	end
+end)
+
+local function seatScanNewProps(beforeSet)
+	local found = {}
+	local targetName = "Prop" .. OwnerName
+	local function check(v)
+		if beforeSet[v] then return end
+		if isCharacterOrPlayer(v) then return end
+		local n = tostring(v.Name or "")
+		if n == targetName or (n:sub(1, 4) == "Prop" and n:find(OwnerName, 1, true)) then
+			table.insert(found, v)
+		end
+	end
+	local wsCom = workspace:FindFirstChild("WorkspaceCom")
+	if wsCom then
+		for _, folder in ipairs(wsCom:GetChildren()) do
+			for _, v in ipairs(folder:GetChildren()) do check(v) end
+		end
+	end
+	for _, v in ipairs(workspace:GetChildren()) do check(v) end
+	return found
+end
+
+local function seatSpawnTraps()
+	if seatSpawning then return end
+	local targets = seatGetSelectedList()
+	if #targets == 0 then
+		if seatStatusLbl then seatStatusLbl.Text = "Selecione pelo menos 1 pessoa" end
+		return
+	end
+	if #targets > 15 then
+		if seatStatusLbl then seatStatusLbl.Text = "Máximo 15 pessoas" end
+		return
+	end
+	local propData = SEAT_PROPS[seatPropIndex]
+	if not propData then return end
+	seatSpawning = true
+	if seatStatusLbl then
+		seatStatusLbl.Text = ("Spawnando %dx %s no ar (%s)..."):format(#targets, propData.label, seatMode)
+	end
+	task.spawn(function()
+		for i, targetPlr in ipairs(targets) do
+			local beforeSet = {}
+			for _, p in ipairs(scanMapProps()) do beforeSet[p] = true end
+			seatPlaceOneProp(propData, i) -- no ar
+			task.wait(0.85)
+			local news = seatScanNewProps(beforeSet)
+			for _, p in ipairs(news) do
+				seatGetCFRemote(p)
+				table.insert(seatTrapProps, {
+					prop = p,
+					mode = seatMode,
+					used = false,
+					targetPlr = targetPlr,
+					pulling = false,
+				})
+			end
+		end
+		seatSpawning = false
+		if seatStatusLbl then
+			seatStatusLbl.Text = ("✅ %d armadilha(s) [%s]"):format(#seatTrapProps, seatMode)
+		end
+	end)
+end
+
+local function seatClearTraps()
+	seatArmed = false
+	if SeatArmBtn then
+		SeatArmBtn.Text = "⚡ ATIVAR ARMADILHA"
+		SeatArmBtn.BackgroundColor3 = STYLES.AccentColor
+	end
+	local n = #seatTrapProps
+	for i = #seatTrapProps, 1, -1 do
+		local entry = seatTrapProps[i]
+		if entry and entry.prop then
+			seatDeleteProp(entry.prop)
+		end
+		seatTrapProps[i] = nil
+	end
+	seatTrapProps = {}
+	if seatStatusLbl then
+		seatStatusLbl.Text = ("Armadilhas limpas (%d)"):format(n)
+		task.delay(2, function()
+			if seatStatusLbl and seatStatusLbl.Text:find("limpas") then
+				seatStatusLbl.Text = ""
+			end
+		end)
+	end
+end
+
+local function seatActivateTraps()
+	if #seatTrapProps == 0 then
+		if seatStatusLbl then seatStatusLbl.Text = "Spawn as armadilhas antes" end
+		return
+	end
+	local targets = seatGetSelectedList()
+	if #targets == 0 then
+		if seatStatusLbl then seatStatusLbl.Text = "Selecione pelo menos 1 pessoa" end
+		return
+	end
+	-- arma no modo escolhido e já processa quem já estiver sentado
+	seatArmed = true
+	if SeatArmBtn then
+		SeatArmBtn.Text = "✅ ARMADILHA ATIVA (" .. string.upper(seatMode) .. ")"
+		SeatArmBtn.BackgroundColor3 = STYLES.GreenColor
+	end
+	-- atualiza modo das armadilhas pro modo atual do botão
+	for _, entry in ipairs(seatTrapProps) do
+		if entry and not entry.used then
+			entry.mode = seatMode
+		end
+	end
+	-- trigger imediato em quem já sentou
+	for _, plr in ipairs(targets) do
+		local char = plr.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Sit and hum.SeatPart then
+			local entry = seatIsOurTrap(hum.SeatPart)
+			if entry then
+				seatTrigger(entry, plr)
+			end
+		end
+	end
+	if seatStatusLbl then
+		seatStatusLbl.Text = ("⚡ Ativo: %s | %d armadilha(s)"):format(seatMode, #seatTrapProps)
+	end
+end
+
+createLabel("—— ASSENTO: PUXAR / MATAR ——", page, 14, 9)
+
+local SeatPropBtn = createStyledBtn("PROP: " .. SEAT_PROPS[1].label, page, BTN_H)
+SeatPropBtn.MouseButton1Click:Connect(function()
+	seatPropIndex = (seatPropIndex % #SEAT_PROPS) + 1
+	SeatPropBtn.Text = "PROP: " .. SEAT_PROPS[seatPropIndex].label
+end)
+
+local SeatModeBtn = createStyledBtn("MODO: 🧲 PUXAR", page, BTN_H, STYLES.GreenColor)
+SeatModeBtn.MouseButton1Click:Connect(function()
+	if seatMode == "puxar" then
+		seatMode = "matar"
+		SeatModeBtn.Text = "MODO: 💀 MATAR"
+		SeatModeBtn.BackgroundColor3 = STYLES.RedColor
+	else
+		seatMode = "puxar"
+		SeatModeBtn.Text = "MODO: 🧲 PUXAR"
+		SeatModeBtn.BackgroundColor3 = STYLES.GreenColor
+	end
+end)
+
+createLabel("Pessoas (toque p/ marcar, até 15):", page, 12, 9)
+
+local seatPlayerScroll = Instance.new("ScrollingFrame")
+seatPlayerScroll.Size = UDim2.new(CONTENT_WIDTH, 0, 0, 90)
+seatPlayerScroll.BackgroundTransparency = 1
+seatPlayerScroll.ScrollBarThickness = 2
+seatPlayerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+seatPlayerScroll.Parent = page
+
+local seatPListLayout = Instance.new("UIListLayout")
+seatPListLayout.Padding = UDim.new(0, 2)
+seatPListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+seatPListLayout.Parent = seatPlayerScroll
+seatPListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	seatPlayerScroll.CanvasSize = UDim2.new(0, 0, 0, seatPListLayout.AbsoluteContentSize.Y + 4)
+end)
+
+local seatTargetInfoLbl = createLabel("Selecionados: 0/15", page, 12, 8)
+
+local function updateSeatPlayerList()
+	for _, c in ipairs(seatPlayerScroll:GetChildren()) do
+		if not c:IsA("UIListLayout") then c:Destroy() end
+	end
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr == LP then continue end
+		local isOn = seatSelected[plr] == true
+		local pBtn = Instance.new("TextButton")
+		pBtn.Text = (isOn and "☑ " or "☐ ") .. plr.DisplayName .. " (@" .. plr.Name .. ")"
+		pBtn.Size = UDim2.new(1, 0, 0, 16)
+		pBtn.BackgroundColor3 = isOn and STYLES.AccentColor or STYLES.CardColor
+		pBtn.TextColor3 = STYLES.TextColor
+		pBtn.Font = Enum.Font.SourceSansBold
+		pBtn.TextSize = 8
+		pBtn.TextXAlignment = Enum.TextXAlignment.Left
+		pBtn.Parent = seatPlayerScroll
+		applyStyle(pBtn, 3, true)
+		local pad = Instance.new("UIPadding")
+		pad.PaddingLeft = UDim.new(0, 4)
+		pad.Parent = pBtn
+		pBtn.MouseButton1Click:Connect(function()
+			if seatSelected[plr] then
+				seatSelected[plr] = nil
+			else
+				if seatSelectedCount() >= 15 then
+					if seatStatusLbl then seatStatusLbl.Text = "Máximo 15 pessoas" end
+					return
+				end
+				seatSelected[plr] = true
+			end
+			updateSeatPlayerList()
+		end)
+	end
+	if seatTargetInfoLbl then
+		seatTargetInfoLbl.Text = ("Selecionados: %d/15"):format(seatSelectedCount())
+	end
+end
+
+updateSeatPlayerList()
+Players.PlayerAdded:Connect(updateSeatPlayerList)
+Players.PlayerRemoving:Connect(function(plr)
+	seatSelected[plr] = nil
+	task.wait(0.1)
+	updateSeatPlayerList()
+end)
+
+local SeatSpawnBtn = createStyledBtn("▶ SPAWN ARMADILHAS (no ar)", page, BTN_H, STYLES.AccentColor)
+SeatSpawnBtn.MouseButton1Click:Connect(function()
+	seatArmed = false
+	if SeatArmBtn then
+		SeatArmBtn.Text = "⚡ ATIVAR ARMADILHA"
+		SeatArmBtn.BackgroundColor3 = STYLES.AccentColor
+	end
+	seatSpawnTraps()
+end)
+
+SeatArmBtn = createStyledBtn("⚡ ATIVAR ARMADILHA", page, BTN_H, STYLES.AccentColor)
+SeatArmBtn.MouseButton1Click:Connect(function()
+	if seatArmed then
+		-- desativa
+		seatArmed = false
+		SeatArmBtn.Text = "⚡ ATIVAR ARMADILHA"
+		SeatArmBtn.BackgroundColor3 = STYLES.AccentColor
+		if seatStatusLbl then seatStatusLbl.Text = "Armadilha desativada" end
+	else
+		seatActivateTraps()
+	end
+end)
+
+local SeatClearBtn = createStyledBtn("🗑 LIMPAR ARMADILHAS", page, BTN_H, STYLES.RedColor)
+SeatClearBtn.MouseButton1Click:Connect(function()
+	seatClearTraps()
+end)
+
+seatStatusLbl = createLabel("", page, 14, 9)
+seatStatusLbl.TextColor3 = STYLES.AccentColor
 
 createLabel("Detecção geométrica • até 15 props\nClique no preset para trocar", page, 28, 9)
-createLabel("(Aba Início isolada)", page, 14, 8)
+createLabel("(Aba Início + Assento)", page, 14, 8)
 
--- Anti-seat loop (desconecta o antigo pra não empilhar e travar)
-if _G.AbyssAntiSeatConn then
-	pcall(function() _G.AbyssAntiSeatConn:Disconnect() end)
-	_G.AbyssAntiSeatConn = nil
-end
-_G.AbyssAntiSeatConn = RS.Heartbeat:Connect(function()
-	if _G.AbyssShared and _G.AbyssShared.antiSeatEnabled then
+-- Anti-seat loop
+RS.Heartbeat:Connect(function()
+	if antiSeatEnabled then
 		updateAntiSeatState()
 	end
 end)
@@ -460,13 +939,8 @@ end)
 local hitInicio = base:FindFirstChild("aba de inicio")
 if hitInicio then
 	local hb = hitInicio:FindFirstChild("Hitbox")
-	if hb then hb.MouseButton1Click:Connect(function()
-		abyssShowPage("PADRAO", page)
-		if applyThemeToPage then pcall(applyThemeToPage, page) end
-		syncAntiSeatBtn() -- botão volta no estado certo (ON/OFF)
-	end) end
+	if hb then hb.MouseButton1Click:Connect(function() abyssShowPage("PADRAO", page) end) end
 end
 
 if page then applyThemeToPage(page) end
-syncAntiSeatBtn()
 print("Abyss DIE — Apenas Aba INÍCIO carregada")
