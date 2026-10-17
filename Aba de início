@@ -382,11 +382,11 @@ local SEAT_PROPS = {
 	{ name = "FurnitureCouchBrown", category = "Furniture", label = "Sofá Marrom" },
 	{ name = "CastleFancyBed", category = "Furniture", label = "Cama Fancy" },
 	{ name = "FurnitureBleachers", category = "Furniture", label = "Arquibancada" },
-	{ name = "Summer2026SlipAndSlide", category = "Carnival", label = "Tobogã 2026" },
-	{ name = "Summer2026Trampoline", category = "Carnival", label = "Trampolim 2026" },
 }
 local seatPropIndex = 1
 local seatMode = "puxar" -- "puxar" | "matar"
+local seatDest = "player" -- "player" | "preso"
+local SEAT_PRESO_CF = CFrame.new(1221.18, 53.76, 1291.17)
 local seatSelected = {} -- [Player] = true (multi-select, até 15)
 local seatTrapProps = {} -- { prop, mode, used, targetPlr, pulling }
 local seatSpawning = false
@@ -503,6 +503,13 @@ local function seatMoveProp(prop, targetCF)
 	end
 end
 
+local function seatGetPullCF()
+	if seatDest == "preso" then return SEAT_PRESO_CF end
+	local myHRP = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	if myHRP then return myHRP.CFrame * CFrame.new(0, 0, -4) end
+	return SEAT_PRESO_CF
+end
+
 local function seatDeleteProp(prop)
 	if not prop then return end
 	pcall(function()
@@ -558,8 +565,7 @@ local function seatTrigger(entry, victimPlr)
 	if not prop or not prop.Parent then return end
 
 	if entry.mode == "matar" then
-		local voidCF = CFrame.new(0, -800, 0)
-		seatMoveProp(prop, voidCF)
+		seatMoveProp(prop, CFrame.new(0, -800, 0))
 		task.defer(function()
 			task.wait(0.05)
 			seatDeleteProp(prop)
@@ -567,58 +573,44 @@ local function seatTrigger(entry, victimPlr)
 		if seatStatusLbl then seatStatusLbl.Text = "💀 Matou: " .. (victimPlr and victimPlr.Name or "?") end
 	else
 		entry.pulling = true
-		local myChar = LP.Character
-		local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
-		if myHRP then
-			seatMoveProp(prop, myHRP.CFrame * CFrame.new(0, 0, -4))
+		entry.dest = seatDest
+		seatMoveProp(prop, seatGetPullCF())
+		if seatStatusLbl then
+			local destName = (seatDest == "preso") and "Preso" or "você"
+			seatStatusLbl.Text = ("🧲 Puxou %s → %s"):format(victimPlr and victimPlr.Name or "?", destName)
 		end
-		if seatStatusLbl then seatStatusLbl.Text = "🧲 Puxou: " .. (victimPlr and victimPlr.Name or "?") end
 	end
 end
 
--- FLING: prop DENTRO do player girando louco até sentar
 if _G.AbyssSeatTrapConn then pcall(function() _G.AbyssSeatTrapConn:Disconnect() end) end
 _G.AbyssSeatTrapConn = RS.Heartbeat:Connect(function()
 	if not seatArmed then return end
 	if #seatTrapProps == 0 then return end
-
-	local myChar = LP.Character
-	local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
 	local t = tick()
-	-- rotação tipo fling (bem rápida)
-	local sx = t * 40
-	local sy = t * 55
-	local sz = t * 35
+	local sx, sy, sz = t * 40, t * 55, t * 35
 
 	for _, entry in ipairs(seatTrapProps) do
 		local prop = entry and entry.prop
 		if prop and prop.Parent then
 			if entry.pulling then
-				if myHRP then
-					seatMoveProp(prop, myHRP.CFrame * CFrame.new(0, 0, -3))
-					local propPos
-					pcall(function()
-						if prop:IsA("Model") then propPos = prop:GetPivot().Position
-						elseif prop:IsA("BasePart") then propPos = prop.Position end
-					end)
-					if propPos and (propPos - myHRP.Position).Magnitude < 10 then
-						seatDeleteProp(prop)
-						entry.prop = nil
-						entry.pulling = false
-						if seatStatusLbl then seatStatusLbl.Text = "🧲 Chegou — prop removido" end
-					end
+				local destCF = (entry.dest == "preso") and SEAT_PRESO_CF or seatGetPullCF()
+				seatMoveProp(prop, destCF)
+				local propPos
+				pcall(function()
+					if prop:IsA("Model") then propPos = prop:GetPivot().Position
+					elseif prop:IsA("BasePart") then propPos = prop.Position end
+				end)
+				if propPos and (propPos - destCF.Position).Magnitude < 12 then
+					seatDeleteProp(prop)
+					entry.prop = nil
+					entry.pulling = false
+					if seatStatusLbl then seatStatusLbl.Text = "🧲 Chegou — prop removido" end
 				end
 			elseif not entry.used then
 				local target = entry.targetPlr
-				if target and target.Parent then
-					local tChar = target.Character
-					local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-					if tRoot then
-						-- BEM DENTRO do player + giro fling
-						local flingCF = CFrame.new(tRoot.Position)
-							* CFrame.Angles(sx, sy, sz)
-						seatMoveProp(prop, flingCF)
-					end
+				local tRoot = target and target.Parent and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+				if tRoot then
+					seatMoveProp(prop, CFrame.new(tRoot.Position) * CFrame.Angles(sx, sy, sz))
 				end
 			end
 		end
@@ -626,13 +618,10 @@ _G.AbyssSeatTrapConn = RS.Heartbeat:Connect(function()
 
 	for _, plr in ipairs(Players:GetPlayers()) do
 		if plr ~= LP then
-			local char = plr.Character
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
 			if hum and hum.Sit and hum.SeatPart then
 				local entry = seatIsOurTrap(hum.SeatPart)
-				if entry then
-					seatTrigger(entry, plr)
-				end
+				if entry then seatTrigger(entry, plr) end
 			end
 		end
 	end
@@ -684,13 +673,11 @@ local function seatSpawnTraps()
 			task.wait(0.85)
 			local news = seatScanNewProps(beforeSet)
 			for _, p in ipairs(news) do
-				seatGetCFRemote(p)
 				table.insert(seatTrapProps, {
 					prop = p,
 					mode = seatMode,
 					used = false,
-					targetPlr = targetPlr,
-					pulling = false,
+					targetPlr = targetPlr, -- armadilha ligada a essa pessoa
 				})
 			end
 		end
@@ -782,6 +769,19 @@ SeatModeBtn.MouseButton1Click:Connect(function()
 		seatMode = "puxar"
 		SeatModeBtn.Text = "MODO: 🧲 PUXAR"
 		SeatModeBtn.BackgroundColor3 = STYLES.GreenColor
+	end
+end)
+
+local SeatDestBtn = createStyledBtn("DESTINO: 🧲 PLAYER", page, BTN_H, STYLES.AccentColor)
+SeatDestBtn.MouseButton1Click:Connect(function()
+	if seatDest == "player" then
+		seatDest = "preso"
+		SeatDestBtn.Text = "DESTINO: 🔒 PRESO"
+		SeatDestBtn.BackgroundColor3 = STYLES.RedColor
+	else
+		seatDest = "player"
+		SeatDestBtn.Text = "DESTINO: 🧲 PLAYER"
+		SeatDestBtn.BackgroundColor3 = STYLES.AccentColor
 	end
 end)
 
